@@ -101,6 +101,15 @@ export interface ApiGraphEdge {
   weight?: number
 }
 
+export interface ApiGraphResponse {
+  nodes: ApiGraphNode[]
+  edges: ApiGraphEdge[]
+  offset: number
+  limit: number
+  totalCount: number
+  hasMore: boolean
+}
+
 export type ApiReviewStatus = "unresolved" | "resolved" | "all"
 
 export interface ApiReviewOption {
@@ -300,16 +309,24 @@ export class LlmWikiApiClient {
     }
   }
 
-  async graph(projectId = "current", options: { q?: string; nodeType?: string; limit?: number } = {}): Promise<{ nodes: ApiGraphNode[]; edges: ApiGraphEdge[] }> {
+  async graph(projectId = "current", options: { q?: string; nodeType?: string; limit?: number; offset?: number; edgeScope?: "page" | "filtered" } = {}): Promise<ApiGraphResponse> {
     const params = new URLSearchParams()
     if (options.q) params.set("q", options.q)
     if (options.nodeType) params.set("nodeType", options.nodeType)
     if (options.limit !== undefined) params.set("limit", String(options.limit))
+    if (options.offset !== undefined) params.set("offset", String(options.offset))
+    if (options.edgeScope) params.set("edgeScope", options.edgeScope)
     const suffix = params.toString() ? `?${params.toString()}` : ""
     const json = await this.request(`/projects/${encodeURIComponent(projectId)}/graph${suffix}`)
     return {
       nodes: Array.isArray(json.nodes) ? json.nodes.map(parseGraphNode) : [],
       edges: Array.isArray(json.edges) ? json.edges.map(parseGraphEdge) : [],
+      offset: typeof json.offset === "number" ? json.offset : 0,
+      limit: typeof json.limit === "number" ? json.limit : 200,
+      totalCount: typeof json.totalCount === "number"
+        ? json.totalCount
+        : (Array.isArray(json.nodes) ? json.nodes.length : 0),
+      hasMore: json.hasMore === true,
     }
   }
 

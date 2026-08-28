@@ -202,6 +202,31 @@ test("graph parses nodeType from API graph nodes", async () => {
   assert.equal(graph.edges[0]?.weight, 0.75)
 })
 
+test("graph forwards pagination and exposes page metadata", async () => {
+  let requestedUrl = ""
+  const fetchImpl = async (input: string | URL | Request): Promise<Response> => {
+    requestedUrl = String(input)
+    return new Response(JSON.stringify({
+      ok: true,
+      nodes: [],
+      edges: [],
+      offset: 200,
+      limit: 200,
+      totalCount: 450,
+      hasMore: true,
+    }), { status: 200 })
+  }
+  const client = new LlmWikiApiClient({ fetchImpl })
+  const graph = await client.graph("current", { limit: 200, offset: 200, edgeScope: "filtered" })
+  assert.match(requestedUrl, /limit=200/)
+  assert.match(requestedUrl, /offset=200/)
+  assert.match(requestedUrl, /edgeScope=filtered/)
+  assert.equal(graph.totalCount, 450)
+  assert.equal(graph.offset, 200)
+  assert.equal(graph.limit, 200)
+  assert.equal(graph.hasMore, true)
+})
+
 test("files exposes truncated flag", async () => {
   const fetchImpl = async (): Promise<Response> => (
     new Response(JSON.stringify({

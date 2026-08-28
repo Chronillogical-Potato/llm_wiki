@@ -154,6 +154,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           q: { type: "string", description: "Optional text filter." },
           node_type: { type: "string", description: "Optional node type filter." },
           limit: { type: "number", description: "Maximum nodes. The local API clamps to its configured maximum." },
+          offset: { type: "number", minimum: 0, description: "Zero-based node offset." },
+          edge_scope: { type: "string", enum: ["page", "filtered"], description: "Use 'page' for self-contained edges or 'filtered' when merging all pages." },
         },
         additionalProperties: false,
       },
@@ -274,8 +276,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           q: optionalStringArg(args.q),
           nodeType: optionalStringArg(args.node_type),
           limit: numberArg(args.limit),
+          offset: numberArg(args.offset),
+          edgeScope: optionalStringArg(args.edge_scope)
+            ? enumArg(args.edge_scope, ["page", "filtered"] as const, "page")
+            : (args.offset !== undefined ? "filtered" : "page"),
         })
-        return textResult(withActiveProject(formatGraph(graph.nodes, graph.edges), scope.project, scope.id))
+        return textResult(withActiveProject(formatGraph(graph), scope.project, scope.id))
       }
       case "llm_wiki_rescan_sources": {
         await assertMcpEnabled()
@@ -500,7 +506,8 @@ function formatReviewOptions(review: ApiReviewItem): string {
     .join(", ")
 }
 
-function formatGraph(nodes: ApiGraphNode[], edges: Array<{ source: string; target: string; weight?: number }>): string {
+function formatGraph(graph: { nodes: ApiGraphNode[]; edges: Array<{ source: string; target: string; weight?: number }>; offset: number; totalCount: number; hasMore: boolean }): string {
+  const { nodes, edges } = graph
   const typeCounts = new Map<string, number>()
   for (const node of nodes) typeCounts.set(node.type, (typeCounts.get(node.type) ?? 0) + 1)
   const lines = [
@@ -508,6 +515,7 @@ function formatGraph(nodes: ApiGraphNode[], edges: Array<{ source: string; targe
     "",
     `Nodes: ${nodes.length}`,
     `Edges: ${edges.length}`,
+    `Page: offset ${graph.offset}, ${nodes.length} of ${graph.totalCount}${graph.hasMore ? " (more available)" : ""}`,
     "",
     "## Node types",
     ...[...typeCounts.entries()]
