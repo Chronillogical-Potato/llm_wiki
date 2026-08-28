@@ -54,6 +54,7 @@ import {
   enqueueIngest,
   enqueueBatch,
   enqueueInactiveProjectBatch,
+  discardInactiveProjectTasksForSources,
   retryTask,
   retryTasks,
   retryAllFailedTasks,
@@ -196,6 +197,50 @@ describe("ingest-queue — enqueue & basic processing", () => {
       `${TEST_PATH_B}/.llm-wiki/ingest-queue.json`,
       expect.stringContaining("raw/sources/second.pdf"),
     )
+  })
+
+  it("discards persisted tasks for deleted inactive-project sources", async () => {
+    mockReadFile.mockImplementation(async (path: string) => {
+      if (path === `${TEST_PATH_B}/.llm-wiki/ingest-queue.json`) {
+        return JSON.stringify([
+          {
+            id: "remove-me",
+            projectId: TEST_ID_B,
+            sourcePath: "raw/sources/old.pdf",
+            folderContext: "",
+            status: "pending",
+            addedAt: 1,
+            error: null,
+            retryCount: 0,
+            autoStart: true,
+          },
+          {
+            id: "keep-me",
+            projectId: TEST_ID_B,
+            sourcePath: "raw/sources/current.pdf",
+            folderContext: "",
+            status: "pending",
+            addedAt: 2,
+            error: null,
+            retryCount: 0,
+            autoStart: true,
+          },
+        ])
+      }
+      throw new Error("ENOENT")
+    })
+
+    await expect(discardInactiveProjectTasksForSources(
+      TEST_ID_B,
+      TEST_PATH_B,
+      ["raw/sources/old.pdf"],
+    )).resolves.toBe(1)
+
+    const lastWrite = mockWriteFile.mock.calls[mockWriteFile.mock.calls.length - 1]
+    const persisted = JSON.parse(String(lastWrite?.[1])) as Array<{
+      id: string
+    }>
+    expect(persisted.map((task) => task.id)).toEqual(["keep-me"])
   })
 
   it("enqueueIngest adds a pending task and triggers processing", async () => {

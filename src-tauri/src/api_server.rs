@@ -2531,6 +2531,7 @@ fn handle_rescan(app: &AppHandle, project_id: &str) -> ApiResponse {
         project.id.clone(),
         project.path.clone(),
         source_watch_config,
+        None,
     ) {
         Ok(result) => ok(json!({ "ok": true, "projectId": project.id, "result": result })),
         Err(e) => err(500, e),

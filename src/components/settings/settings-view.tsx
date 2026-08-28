@@ -25,7 +25,13 @@ import { useWikiStore } from "@/stores/wiki-store"
 import { useChatStore } from "@/stores/chat-store"
 import { useUpdateStore, hasAvailableUpdate } from "@/stores/update-store"
 import { useZoomStore } from "@/stores/zoom-store"
-import { loadSourceWatchConfig, saveLanguage, saveTheme, loadTheme } from "@/lib/project-store"
+import {
+  loadSourceWatchAllProjects,
+  loadSourceWatchConfig,
+  saveLanguage,
+  saveTheme,
+  loadTheme,
+} from "@/lib/project-store"
 import { applyTheme, type AppTheme } from "@/lib/theme"
 import type { SettingsDraft, DraftSetter } from "./settings-types"
 import { normalizeSourceWatchConfig } from "@/lib/source-watch-config"
@@ -98,6 +104,7 @@ function initialDraft(
   proxy: ReturnType<typeof useWikiStore.getState>["proxyConfig"],
   scheduledImport: ReturnType<typeof useWikiStore.getState>["scheduledImportConfig"],
   sourceWatch: ReturnType<typeof useWikiStore.getState>["sourceWatchConfig"],
+  sourceWatchAllProjects: boolean,
   mineru: ReturnType<typeof useWikiStore.getState>["mineruConfig"],
   apiConfig: ReturnType<typeof useWikiStore.getState>["apiConfig"],
   generalConfig: ReturnType<typeof useWikiStore.getState>["generalConfig"],
@@ -162,6 +169,7 @@ function initialDraft(
     scheduledImportPath: displayPath,
     scheduledImportInterval: scheduledImport.interval,
     sourceWatchConfig: normalizeSourceWatchConfig(sourceWatch),
+    sourceWatchAllProjects,
     mineruEnabled: mineru.enabled,
     mineruBackend: mineru.backend || "cloud",
     mineruLocalEndpoint:
@@ -207,6 +215,8 @@ export function SettingsView() {
   const setScheduledImportConfig = useWikiStore((s) => s.setScheduledImportConfig)
   const sourceWatchConfig = useWikiStore((s) => s.sourceWatchConfig)
   const setSourceWatchConfig = useWikiStore((s) => s.setSourceWatchConfig)
+  const sourceWatchAllProjects = useWikiStore((s) => s.sourceWatchAllProjects)
+  const setSourceWatchAllProjects = useWikiStore((s) => s.setSourceWatchAllProjects)
   const mineruConfig = useWikiStore((s) => s.mineruConfig)
   const setMineruConfig = useWikiStore((s) => s.setMineruConfig)
   const apiConfig = useWikiStore((s) => s.apiConfig)
@@ -238,6 +248,7 @@ export function SettingsView() {
       proxyConfig,
       scheduledImportConfig,
       sourceWatchConfig,
+      sourceWatchAllProjects,
       mineruConfig,
       apiConfig,
       generalConfig,
@@ -259,23 +270,31 @@ export function SettingsView() {
 
   useEffect(() => {
     let cancelled = false
-    loadSourceWatchConfig(project?.id).then((config) => {
+    Promise.allSettled([
+      loadSourceWatchConfig(project?.id),
+      loadSourceWatchAllProjects(),
+    ]).then(([configResult, allProjectsResult]) => {
       if (cancelled) return
+      const config = configResult.status === "fulfilled"
+        ? configResult.value
+        : normalizeSourceWatchConfig()
+      const allProjects = allProjectsResult.status === "fulfilled"
+        ? allProjectsResult.value
+        : false
       const normalized = normalizeSourceWatchConfig(config)
       setSourceWatchConfig(normalized)
+      setSourceWatchAllProjects(allProjects)
       setIngestWorkerLimit(normalized.ingestConcurrency)
-      setDraftState((prev) => ({ ...prev, sourceWatchConfig: normalized }))
-    }).catch(() => {
-      if (cancelled) return
-      const fallback = normalizeSourceWatchConfig()
-      setSourceWatchConfig(fallback)
-      setIngestWorkerLimit(fallback.ingestConcurrency)
-      setDraftState((prev) => ({ ...prev, sourceWatchConfig: fallback }))
+      setDraftState((prev) => ({
+        ...prev,
+        sourceWatchConfig: normalized,
+        sourceWatchAllProjects: allProjects,
+      }))
     })
     return () => {
       cancelled = true
     }
-  }, [project?.id, setSourceWatchConfig])
+  }, [project?.id, setSourceWatchAllProjects, setSourceWatchConfig])
 
   // Resync draft from store if it changes out-of-band (e.g. project switch).
   // IMPORTANT: keep the current draft.uiLanguage instead of re-reading
@@ -297,6 +316,7 @@ export function SettingsView() {
         proxyConfig,
         scheduledImportConfig,
         sourceWatchConfig,
+        sourceWatchAllProjects,
         mineruConfig,
         apiConfig,
         generalConfig,
@@ -315,6 +335,7 @@ export function SettingsView() {
     proxyConfig,
     scheduledImportConfig,
     sourceWatchConfig,
+    sourceWatchAllProjects,
     mineruConfig,
     apiConfig,
     generalConfig,
@@ -347,6 +368,7 @@ export function SettingsView() {
       saveScheduledImportConfig,
       loadScheduledImportConfig,
       saveSourceWatchConfig,
+      saveSourceWatchAllProjects,
       saveMineruConfig,
       loadMineruConfig,
       saveApiConfig,
@@ -454,6 +476,7 @@ export function SettingsView() {
     setOutputLanguage(draft.outputLanguage as typeof outputLanguage)
     setProxyConfig(newProxy)
     setSourceWatchConfig(newSourceWatch)
+    setSourceWatchAllProjects(draft.sourceWatchAllProjects)
     setIngestWorkerLimit(newSourceWatch.ingestConcurrency)
     setScheduledImportConfig(newScheduledImport)
     setMaxHistoryMessages(draft.maxHistoryMessages)
@@ -468,14 +491,25 @@ export function SettingsView() {
       await saveOutputLanguage(draft.outputLanguage as typeof outputLanguage, project?.id)
       await saveProxyConfig(newProxy)
       await saveSourceWatchConfig(newSourceWatch, project?.id)
+      await saveSourceWatchAllProjects(draft.sourceWatchAllProjects)
       if (project) {
-        const { startProjectFileSync, stopProjectFileSync } = await import("@/lib/project-file-sync")
+        const {
+          startAllProjectFileSync,
+          startProjectFileSync,
+          stopAllProjectFileSync,
+          stopProjectFileSync,
+        } = await import("@/lib/project-file-sync")
         if (newSourceWatch.enabled) {
           await startProjectFileSync(project, newSourceWatch).catch((err) =>
             console.error("Failed to start project file sync:", err)
           )
         } else {
           await stopProjectFileSync()
+        }
+        if (draft.sourceWatchAllProjects) {
+          startAllProjectFileSync(project)
+        } else {
+          stopAllProjectFileSync()
         }
       }
       // Apply the proxy env vars LIVE so the next outbound request
@@ -557,6 +591,7 @@ export function SettingsView() {
           persistedOutputLanguage,
           persistedProxy,
           persistedSourceWatch,
+          persistedSourceWatchAllProjects,
           persistedScheduledImport,
           persistedMineru,
           persistedApi,
@@ -569,6 +604,7 @@ export function SettingsView() {
           loadOutputLanguage(project?.id),
           loadProxyConfig(),
           loadSourceWatchConfig(project?.id),
+          loadSourceWatchAllProjects(),
           project ? loadScheduledImportConfig(project.path) : Promise.resolve(null),
           loadMineruConfig(),
           loadApiConfig(),
@@ -581,6 +617,9 @@ export function SettingsView() {
         setOutputLanguage((resultValue(persistedOutputLanguage, null) ?? outputLanguage) as typeof outputLanguage)
         setProxyConfig(resultValue(persistedProxy, null) ?? proxyConfig)
         setSourceWatchConfig(resultValue(persistedSourceWatch, sourceWatchConfig))
+        setSourceWatchAllProjects(
+          resultValue(persistedSourceWatchAllProjects, sourceWatchAllProjects),
+        )
         setScheduledImportConfig(resultValue(persistedScheduledImport, null) ?? scheduledImportConfig)
         setMaxHistoryMessages(maxHistoryMessages)
         setMineruConfig(resultValue(persistedMineru, null) ?? mineruConfig)
@@ -601,6 +640,7 @@ export function SettingsView() {
     outputLanguage,
     proxyConfig,
     sourceWatchConfig,
+    sourceWatchAllProjects,
     scheduledImportConfig,
     mineruConfig,
     apiConfig,
@@ -613,6 +653,7 @@ export function SettingsView() {
     setProxyConfig,
     setScheduledImportConfig,
     setSourceWatchConfig,
+    setSourceWatchAllProjects,
     setMineruConfig,
     setApiConfig,
     setGeneralConfig,

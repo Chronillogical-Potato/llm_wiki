@@ -332,18 +332,48 @@ pub fn rescan_project_files(
     project_id: String,
     project_path: String,
     source_watch_config: Option<SourceWatchConfig>,
+    watch_roots_only: Option<bool>,
 ) -> Result<FileChangeRescanResult, String> {
     run_guarded("rescan_project_files", || {
         let root = PathBuf::from(project_path);
         let source_watch_config = normalize_source_watch_config(source_watch_config);
         ensure_sync_dir(&root)?;
-        enqueue_rescan_changes(&root, &project_id, &source_watch_config)?;
+        if watch_roots_only.unwrap_or(false) {
+            enqueue_startup_rescan_changes(&root, &project_id, &source_watch_config)?;
+        } else {
+            enqueue_rescan_changes(&root, &project_id, &source_watch_config)?;
+        }
         let changed_tasks = process_queue(&app, &root, &project_id)?;
         let queue = with_queue_lock(&root, || read_queue(&root))?;
         emit_queue(&app, &project_id, &queue);
         Ok(FileChangeRescanResult {
             queue,
             changed_tasks,
+        })
+    })
+}
+
+#[tauri::command]
+pub fn invalidate_project_file_snapshot_paths(
+    project_path: String,
+    paths: Vec<String>,
+) -> Result<(), String> {
+    run_guarded("invalidate_project_file_snapshot_paths", || {
+        let root = PathBuf::from(project_path);
+        let rels = paths
+            .iter()
+            .map(|path| {
+                normalize_rel_path(Path::new(path))
+                    .ok_or_else(|| format!("invalid project-relative snapshot path: {path}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        with_queue_lock(&root, || {
+            let mut snapshot = read_snapshot(&root)?;
+            for rel in rels {
+                snapshot.files.remove(&rel);
+            }
+            snapshot.updated_at = now_ms();
+            write_snapshot(&root, &snapshot)
         })
     })
 }
@@ -1522,6 +1552,34 @@ mod tests {
         assert_eq!(by_path.get(old), Some(&FileChangeKind::Deleted));
         assert_eq!(by_path.get(new), Some(&FileChangeKind::Created));
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn invalidating_snapshot_paths_makes_existing_files_detectable_again() {
+        let root = temp_root("invalidate-snapshot");
+        let rel = "raw/sources/retry.md";
+        fs::write(root.join(rel), "retry me").unwrap();
+        ensure_sync_dir(&root).unwrap();
+        sync_snapshot_paths(&root, BTreeSet::from([rel.to_string()])).unwrap();
+
+        invalidate_project_file_snapshot_paths(
+            root.to_string_lossy().to_string(),
+            vec![rel.to_string()],
+        )
+        .unwrap();
+        enqueue_rescan_changes_for_prefixes(
+            &root,
+            "p1",
+            &["raw/sources"],
+            &default_watch_config(),
+        )
+        .unwrap();
+
+        let queue = read_queue(&root).unwrap();
+        assert!(queue.tasks.iter().any(|task| {
+            task.path == rel && task.kind == FileChangeKind::Created
+        }));
         let _ = fs::remove_dir_all(root);
     }
 

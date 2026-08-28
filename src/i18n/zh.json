@@ -764,6 +764,8 @@
         "description": "监控 raw/sources 的外部变化，并选择哪些文件允许自动进入提取队列。",
         "enable": "监控项目资料文件夹",
         "enableDescription": "刷新原始资料列表，并为 raw/sources 下允许的新文件或修改文件建立提取任务。",
+        "allProjects": "监控所有最近项目",
+        "allProjectsDescription": "持续检查最近项目列表中所有已启用资料监控的项目。后台发现的变化会写入对应项目的队列，并在打开该项目后执行。",
         "autoIngest": "自动提取允许的原始资料文件",
         "autoIngestDescription": "关闭后，外部变化仍会刷新文件树，但不会创建提取任务。",
         "persistExtractedMarkdown": "保留解析后的 Markdown",

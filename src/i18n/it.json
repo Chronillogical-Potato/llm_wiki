@@ -764,6 +764,8 @@
         "description": "Controlla raw/sources per intercettare modifiche esterne e scegli quali file possono entrare nell'elaborazione automatica.",
         "enable": "Monitora la cartella fonti del progetto",
         "enableDescription": "Aggiorna la vista Fonti e indicizza i file consentiti nuovi o modificati sotto raw/sources.",
+        "allProjects": "Monitora tutti i progetti recenti",
+        "allProjectsDescription": "Controlla le cartelle delle fonti di tutti i progetti recenti con il monitoraggio attivo. Le modifiche in background vengono accodate nel progetto corrispondente ed eseguite quando viene aperto.",
         "autoIngest": "Elabora automaticamente i file sorgente consentiti",
         "autoIngestDescription": "Se disattivo, le modifiche esterne aggiornano comunque l'albero dei file ma non creano attività di elaborazione.",
         "persistExtractedMarkdown": "Conserva il Markdown estratto",

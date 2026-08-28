@@ -1,6 +1,7 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event"
 import { readFile } from "@/commands/fs"
 import {
+  invalidateProjectFileSnapshotPaths,
   rescanProjectFiles,
   startProjectFileWatcher,
   stopProjectFileWatcher,
@@ -16,11 +17,17 @@ import {
   cleanupDeletedWikiPages,
   deleteSourceFiles,
   enqueueSourceIngest,
+  folderContextForSourcePath,
   isIngestableSourcePath,
   migrateSourcePath,
 } from "@/lib/source-lifecycle"
+import {
+  discardInactiveProjectTasksForSources,
+  enqueueInactiveProjectBatch,
+} from "@/lib/ingest-queue"
 import { isPathAllowedBySourceWatch, normalizeSourceWatchConfig } from "@/lib/source-watch-config"
 import { refreshProjectFileTree } from "@/lib/project-file-tree-refresh"
+import { getRecentProjects, loadSourceWatchConfig } from "@/lib/project-store"
 
 let unlistenQueue: UnlistenFn | null = null
 let unlistenChanged: UnlistenFn | null = null
@@ -30,6 +37,11 @@ let pendingRefreshPaths = new Set<string>()
 let pendingChangeTasks = new Map<string, FileChangeTask>()
 let activeSourceWatchConfig = normalizeSourceWatchConfig()
 let handledChangeTaskKeys = new Set<string>()
+let allProjectsTimer: ReturnType<typeof setInterval> | null = null
+let allProjectsRunId = 0
+let allProjectsScanning = false
+let allProjectsActiveProject: WikiProject | null = null
+const ALL_PROJECTS_SCAN_INTERVAL_MS = 60_000
 
 export async function startProjectFileSync(
   project: WikiProject,
@@ -107,6 +119,66 @@ export async function stopProjectFileSync(): Promise<void> {
   }
 }
 
+export function startAllProjectFileSync(activeProject: WikiProject): void {
+  stopAllProjectFileSync()
+  allProjectsActiveProject = activeProject
+  const runId = ++allProjectsRunId
+  void scanInactiveProjects(activeProject, runId)
+  allProjectsTimer = setInterval(() => {
+    void scanInactiveProjects(activeProject, runId)
+  }, ALL_PROJECTS_SCAN_INTERVAL_MS)
+}
+
+export function stopAllProjectFileSync(): void {
+  allProjectsRunId += 1
+  allProjectsActiveProject = null
+  if (allProjectsTimer) {
+    clearInterval(allProjectsTimer)
+    allProjectsTimer = null
+  }
+}
+
+async function scanInactiveProjects(activeProject: WikiProject, runId: number): Promise<void> {
+  if (allProjectsScanning || runId !== allProjectsRunId) return
+  allProjectsScanning = true
+  try {
+    const recents = await getRecentProjects()
+    const seen = new Set<string>([activeProject.id])
+    const seenPaths = new Set<string>([normalizePath(activeProject.path)])
+    for (const project of recents) {
+      if (runId !== allProjectsRunId) return
+      const projectPath = normalizePath(project.path)
+      if (seen.has(project.id) || seenPaths.has(projectPath)) continue
+      seen.add(project.id)
+      seenPaths.add(projectPath)
+      try {
+        const config = normalizeSourceWatchConfig(await loadSourceWatchConfig(project.id))
+        if (!config.enabled) continue
+        const result = await rescanProjectFiles(
+          project.id,
+          projectPath,
+          config,
+          true,
+        )
+        if (runId !== allProjectsRunId) return
+        if (result.changedTasks.length > 0) {
+          const paths = [...new Set(result.changedTasks.map((task) => task.path))]
+          await processFileChangeBatch(project, paths, result.changedTasks, config, false)
+        }
+      } catch (err) {
+        console.warn(`[file-sync] failed to scan inactive project ${project.path}:`, err)
+      }
+    }
+  } finally {
+    allProjectsScanning = false
+    const latestProject = allProjectsActiveProject
+    const latestRunId = allProjectsRunId
+    if (runId !== latestRunId && latestProject && allProjectsTimer) {
+      void scanInactiveProjects(latestProject, latestRunId)
+    }
+  }
+}
+
 export async function rescanProjectFileSync(
   project: WikiProject,
   sourceWatchConfig?: SourceWatchConfig,
@@ -171,6 +243,8 @@ async function processFileChangeBatch(
   project: WikiProject,
   paths: string[],
   tasks: FileChangeTask[],
+  sourceWatchConfig: SourceWatchConfig = activeSourceWatchConfig,
+  refreshActiveProject = true,
 ): Promise<void> {
   for (const task of tasks) {
     handledChangeTaskKeys.add(changeTaskKey(task))
@@ -178,11 +252,17 @@ async function processFileChangeBatch(
   if (handledChangeTaskKeys.size > 4096) {
     handledChangeTaskKeys = new Set([...handledChangeTaskKeys].slice(-2048))
   }
+  if (!refreshActiveProject) {
+    const deletedSources = tasks
+      .filter((task) => task.kind === "deleted" && isRawSourcePathForCascade(task.path))
+      .map((task) => task.path)
+    await discardInactiveProjectTasksForSources(project.id, project.path, deletedSources)
+  }
   const movedTaskIds = await migrateUnchangedSourceMoves(project, tasks)
   const remainingTasks = tasks.filter((task) => !movedTaskIds.has(task.id))
   await cleanupDeletedFiles(project, remainingTasks)
-  await enqueueRawSourceChanges(project, remainingTasks)
-  await refreshAfterFileChanges(project, paths)
+  await enqueueRawSourceChanges(project, remainingTasks, sourceWatchConfig, refreshActiveProject)
+  if (refreshActiveProject) await refreshAfterFileChanges(project, paths)
 }
 
 async function migrateUnchangedSourceMoves(
@@ -253,8 +333,13 @@ async function refreshAfterFileChanges(project: WikiProject, relativePaths: stri
   }
 }
 
-async function enqueueRawSourceChanges(project: WikiProject, tasks: FileChangeTask[]): Promise<void> {
-  const config = normalizeSourceWatchConfig(activeSourceWatchConfig)
+async function enqueueRawSourceChanges(
+  project: WikiProject,
+  tasks: FileChangeTask[],
+  sourceWatchConfig: SourceWatchConfig,
+  activeProject: boolean,
+): Promise<void> {
+  const config = normalizeSourceWatchConfig(sourceWatchConfig)
   if (!config.enabled || !config.autoIngest) return
 
   const candidates = tasks
@@ -268,9 +353,29 @@ async function enqueueRawSourceChanges(project: WikiProject, tasks: FileChangeTa
   if (paths.length === 0) return
 
   try {
-    await enqueueSourceIngest(project, paths, useWikiStore.getState().llmConfig)
+    if (activeProject) {
+      await enqueueSourceIngest(project, paths, useWikiStore.getState().llmConfig, {
+        parsingConcurrency: config.parsingConcurrency,
+      })
+    } else {
+      await enqueueInactiveProjectBatch(
+        project.id,
+        project.path,
+        paths.map((sourcePath) => ({
+          sourcePath,
+          folderContext: folderContextForSourcePath(sourcePath),
+        })),
+      )
+    }
   } catch (err) {
     console.error("[file-sync] failed to enqueue raw source ingest:", err)
+    if (!activeProject) {
+      try {
+        await invalidateProjectFileSnapshotPaths(project.path, paths)
+      } catch (invalidateErr) {
+        console.error("[file-sync] failed to schedule background ingest retry:", invalidateErr)
+      }
+    }
   }
 }
 

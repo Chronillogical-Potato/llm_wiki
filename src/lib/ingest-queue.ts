@@ -389,6 +389,53 @@ export async function enqueueInactiveProjectBatch(
 }
 
 /**
+ * Remove persisted ingest work for deleted sources in an inactive project.
+ * If the project becomes active while the background scan is running, defer
+ * to the in-memory queue instead of overwriting its newer disk snapshot.
+ */
+export async function discardInactiveProjectTasksForSources(
+  projectId: string,
+  projectPath: string,
+  sourcePaths: readonly string[],
+): Promise<number> {
+  if (sourcePaths.length === 0) return 0
+  if (currentProjectId === projectId) return discardTasksForSources(sourcePaths)
+
+  const pp = normalizePath(projectPath)
+  const normalizedSources = sourcePaths.map((sourcePath) => {
+    const normalized = normalizePath(sourcePath)
+    return normalized.startsWith(`${pp}/`) ? normalized.slice(pp.length + 1) : normalized
+  })
+  let removed = 0
+  const operation = inactiveQueueWrite.then(async () => {
+    if (currentProjectId === projectId) {
+      removed = await discardTasksForSources(normalizedSources)
+      return
+    }
+    const persisted = await loadQueue(pp, projectId)
+    if (currentProjectId === projectId) {
+      removed = await discardTasksForSources(normalizedSources)
+      return
+    }
+    const retained = persisted.filter((task) => {
+      const matches = task.projectId === projectId && normalizedSources.some((sourcePath) =>
+        normalizeSourcePathForQueue(task.sourcePath) === normalizeSourcePathForQueue(sourcePath)
+      )
+      if (matches) removed += 1
+      return !matches
+    })
+    if (removed > 0) {
+      await writeFile(queueFilePath(pp), JSON.stringify(retained, null, 2))
+    }
+  })
+  inactiveQueueWrite = operation.catch((err) => {
+    console.warn("[Ingest Queue] Failed to discard inactive-project tasks:", err)
+  })
+  await operation
+  return removed
+}
+
+/**
  * Retry a failed or cancelled task. Only valid for stopped tasks in the
  * active project's queue.
  */
