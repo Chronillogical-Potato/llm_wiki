@@ -1902,6 +1902,9 @@ fn prepare_chat(
     let project = resolve_project(app, project_id).map_err(|e| err(404, e))?;
     let mut req: agent::AgentChatRequest =
         serde_json::from_str(body).map_err(|e| err(400, format!("Invalid JSON: {e}")))?;
+    // This is an internal desktop preflight escape hatch for CLI-backed chat.
+    // The public API must retain its actionable generator-configuration error.
+    req.allow_empty_retrieval = false;
     if req.message.trim().is_empty() {
         return Err(err(400, "message is required"));
     }
