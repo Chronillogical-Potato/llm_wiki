@@ -30,7 +30,9 @@ vi.mock("@tauri-apps/api/event", () => ({
 import {
   createClaudeCodeStreamParser,
   buildExitError,
+  createBoundedDiagnosticBuffer,
   extractClaudeCodeStructuredError,
+  shouldCaptureClaudeDiagnostic,
   streamClaudeCodeCli,
 } from "../claude-cli-transport"
 import { useWikiStore } from "@/stores/wiki-store"
@@ -504,5 +506,44 @@ describe("extractClaudeCodeStructuredError", () => {
       type: "error",
       error: { message: "rate limit exceeded" },
     }))).toBe("rate limit exceeded")
+  })
+})
+
+describe("Claude CLI diagnostic buffering", () => {
+  it("ignores normal structured lifecycle and hook events", () => {
+    expect(shouldCaptureClaudeDiagnostic(JSON.stringify({
+      type: "system",
+      subtype: "hook_started",
+      message: "running hook",
+    }))).toBe(false)
+    expect(shouldCaptureClaudeDiagnostic(JSON.stringify({
+      type: "result",
+      is_error: false,
+      result: "done",
+    }))).toBe(false)
+  })
+
+  it("keeps non-JSON and structured error diagnostics", () => {
+    expect(shouldCaptureClaudeDiagnostic("fatal process failure")).toBe(true)
+    expect(shouldCaptureClaudeDiagnostic(JSON.stringify({
+      type: "result",
+      is_error: true,
+      result: "token expired",
+    }))).toBe(true)
+  })
+
+  it("retains the newest diagnostics when capacity is exceeded", () => {
+    const buffer = createBoundedDiagnosticBuffer(12)
+    buffer.append("old-message")
+    buffer.append("FINAL-ERROR")
+    expect(buffer.value()).toContain("FINAL-ERROR")
+    expect(buffer.value()).not.toContain("old-message")
+    expect(Array.from(buffer.value()).length).toBeLessThanOrEqual(12)
+  })
+
+  it("does not split unicode code points at the capacity boundary", () => {
+    const buffer = createBoundedDiagnosticBuffer(3)
+    buffer.append("错误信息")
+    expect(buffer.value()).toBe("误信息")
   })
 })
