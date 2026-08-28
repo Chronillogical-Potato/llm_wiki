@@ -28,6 +28,7 @@ import type { FileNode } from "@/types/wiki"
 import { normalizePath } from "@/lib/path-utils"
 import { chunkMarkdown, type Chunk } from "@/lib/text-chunker"
 import { parseFrontmatter } from "@/lib/frontmatter"
+import { clampUserConcurrency } from "@/lib/concurrency-limits"
 
 // ── Error surfacing ──────────────────────────────────────────────────────
 
@@ -143,7 +144,7 @@ function supportsOpenAiCompatibleBatch(cfg: EmbeddingConfig): boolean {
 type AsyncLimiter = <T>(task: () => Promise<T>) => Promise<T>
 
 function createAsyncLimiter(rawLimit: number | undefined): AsyncLimiter {
-  const limit = Math.max(1, Math.min(32, Math.floor(rawLimit ?? 1)))
+  const limit = clampUserConcurrency(rawLimit ?? 1)
   let active = 0
   const waiters: Array<() => void> = []
   return async <T>(task: () => Promise<T>): Promise<T> => {
@@ -460,7 +461,7 @@ async function parallelForEach<T>(
 ): Promise<void> {
   const workerCount = Math.min(
     items.length,
-    Math.max(1, Math.min(32, Math.floor(rawLimit ?? 1))),
+    clampUserConcurrency(rawLimit ?? 1),
   )
   let next = 0
   await Promise.all(Array.from({ length: workerCount }, async () => {

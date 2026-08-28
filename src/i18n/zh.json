@@ -646,7 +646,7 @@
         "overlapChunkChars": "重叠字符数",
         "overlapChunkCharsHint": "相邻 chunk 之间的重叠字符数，避免语义在边界被切断。",
         "concurrency": "并发请求数",
-        "concurrencyHint": "同时进行的 embedding 请求上限（1–32）。请根据 endpoint 承载能力逐步调高。",
+        "concurrencyHint": "同时进行的 embedding 请求上限（1–64）。请根据 endpoint 承载能力逐步调高。",
         "batchSize": "单次请求输入数",
         "batchSizeHint": "仅 OpenAI 兼容 endpoint 支持（1–64）；不支持的 Provider 会自动使用单条请求。",
         "providerTests": "Provider 测试",

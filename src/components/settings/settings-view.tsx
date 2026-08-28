@@ -25,6 +25,7 @@ import { useWikiStore } from "@/stores/wiki-store"
 import { useChatStore } from "@/stores/chat-store"
 import { useUpdateStore, hasAvailableUpdate } from "@/stores/update-store"
 import { useZoomStore } from "@/stores/zoom-store"
+import { clampUserConcurrency } from "@/lib/concurrency-limits"
 import {
   loadSourceWatchAllProjects,
   loadSourceWatchConfig,
@@ -145,7 +146,7 @@ function initialDraft(
     embeddingOutputDimensionality: embed.outputDimensionality,
     embeddingMaxChunkChars: embed.maxChunkChars,
     embeddingOverlapChunkChars: embed.overlapChunkChars,
-    embeddingConcurrency: embed.concurrency ?? 1,
+    embeddingConcurrency: clampUserConcurrency(embed.concurrency ?? 1),
     embeddingBatchSize: embed.batchSize ?? 1,
     embeddingExtraHeaders: embed.extraHeaders ?? {},
     multimodalEnabled: multimodal.enabled,
@@ -158,7 +159,7 @@ function initialDraft(
     multimodalAzureApiVersion: multimodal.azureApiVersion ?? "2024-10-21",
     multimodalAzureModelFamily: multimodal.azureModelFamily ?? "auto",
     multimodalApiMode: multimodal.apiMode,
-    multimodalConcurrency: multimodal.concurrency,
+    multimodalConcurrency: clampUserConcurrency(multimodal.concurrency, 4),
     outputLanguage,
     maxHistoryMessages,
     proxyEnabled: proxy.enabled,
@@ -401,7 +402,7 @@ export function SettingsView() {
       outputDimensionality: draft.embeddingOutputDimensionality,
       maxChunkChars: draft.embeddingMaxChunkChars,
       overlapChunkChars: draft.embeddingOverlapChunkChars,
-      concurrency: Math.max(1, Math.min(32, Math.floor(draft.embeddingConcurrency || 1))),
+      concurrency: clampUserConcurrency(draft.embeddingConcurrency || 1),
       batchSize: Math.max(1, Math.min(64, Math.floor(draft.embeddingBatchSize || 1))),
       extraHeaders: draft.embeddingExtraHeaders,
     }
@@ -416,13 +417,8 @@ export function SettingsView() {
       azureApiVersion: draft.multimodalProvider === "azure" ? draft.multimodalAzureApiVersion.trim() : undefined,
       azureModelFamily: draft.multimodalProvider === "azure" ? draft.multimodalAzureModelFamily : undefined,
       apiMode: draft.multimodalProvider === "custom" ? draft.multimodalApiMode : undefined,
-      // Clamp at save time so a hand-edited persisted store with a
-      // ridiculous concurrency value (e.g. someone setting 1000 in
-      // the JSON) doesn't blow up the captioning pipeline. Caption
-      // calls already share the LLM endpoint with everything else;
-      // going wider than ~16 just queues behind the server's batch
-      // slot.
-      concurrency: Math.max(1, Math.min(16, draft.multimodalConcurrency || 4)),
+      // Clamp hand-edited persisted values at the shared application limit.
+      concurrency: clampUserConcurrency(draft.multimodalConcurrency || 4),
     }
 
     const newProxy = {

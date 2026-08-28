@@ -1,5 +1,6 @@
 import type { SourceWatchConfig } from "@/stores/wiki-store"
 import { normalizePath } from "@/lib/path-utils"
+import { clampUserConcurrency } from "@/lib/concurrency-limits"
 import sourceWatchDefaults from "@/lib/source-watch-defaults.json"
 
 export const DEFAULT_SOURCE_WATCH_CONFIG: SourceWatchConfig = sourceWatchDefaults
@@ -45,12 +46,12 @@ export function normalizeSourceWatchConfig(config?: Partial<SourceWatchConfig> |
   const rawParsingConcurrency = config?.parsingConcurrency
     ?? DEFAULT_SOURCE_WATCH_CONFIG.parsingConcurrency
   const parsingConcurrency = Number.isFinite(rawParsingConcurrency)
-    ? Math.max(1, Math.min(8, Math.floor(rawParsingConcurrency)))
+    ? clampUserConcurrency(rawParsingConcurrency)
     : DEFAULT_SOURCE_WATCH_CONFIG.parsingConcurrency
   const rawIngestConcurrency = config?.ingestConcurrency
     ?? DEFAULT_SOURCE_WATCH_CONFIG.ingestConcurrency
   const ingestConcurrency = Number.isFinite(rawIngestConcurrency)
-    ? Math.max(1, Math.min(5, Math.floor(rawIngestConcurrency)))
+    ? clampUserConcurrency(rawIngestConcurrency)
     : DEFAULT_SOURCE_WATCH_CONFIG.ingestConcurrency
   return {
     enabled: config?.enabled ?? DEFAULT_SOURCE_WATCH_CONFIG.enabled,

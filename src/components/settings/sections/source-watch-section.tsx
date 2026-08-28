@@ -6,6 +6,7 @@ import {
   normalizeSourceWatchConfig,
   SOURCE_WATCH_FILE_TYPE_GROUPS,
 } from "@/lib/source-watch-config"
+import { MAX_USER_CONCURRENCY } from "@/lib/concurrency-limits"
 
 interface Props {
   draft: SettingsDraft
@@ -137,7 +138,7 @@ export function SourceWatchSection({ draft, setDraft, projectReady }: Props) {
           <input
             type="number"
             min={1}
-            max={8}
+            max={MAX_USER_CONCURRENCY}
             value={config.parsingConcurrency}
             onChange={(event) => updateConfig({ parsingConcurrency: Number(event.target.value) || 1 })}
             disabled={!projectReady}
@@ -160,7 +161,7 @@ export function SourceWatchSection({ draft, setDraft, projectReady }: Props) {
           <input
             type="number"
             min={1}
-            max={5}
+            max={MAX_USER_CONCURRENCY}
             value={config.ingestConcurrency}
             onChange={(event) => updateConfig({ ingestConcurrency: Number(event.target.value) || 1 })}
             disabled={!projectReady}

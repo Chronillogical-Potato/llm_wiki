@@ -5,6 +5,7 @@ import { getProjectPathById } from "@/lib/project-identity"
 import { hasUsableLlm } from "@/lib/has-usable-llm"
 import { getTaskLlmConfig } from "@/lib/llm-task-routing"
 import { IngestCommitCoordinator } from "@/lib/ingest-commit-coordinator"
+import { clampUserConcurrency } from "@/lib/concurrency-limits"
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -89,7 +90,7 @@ function resetQueueAccounting(): void {
 }
 
 export function setIngestWorkerLimit(limit: number): void {
-  workerLimit = Math.max(1, Math.min(5, Math.floor(limit) || 1))
+  workerLimit = clampUserConcurrency(limit)
   if (currentProjectId && !paused) processNext(currentProjectId)
 }
 

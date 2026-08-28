@@ -127,7 +127,7 @@ describe("ingest-queue — enqueue & basic processing", () => {
     setIngestWorkerLimit(0)
     expect(getIngestWorkerLimit()).toBe(1)
     setIngestWorkerLimit(99)
-    expect(getIngestWorkerLimit()).toBe(5)
+    expect(getIngestWorkerLimit()).toBe(64)
     setIngestWorkerLimit(2.9)
     expect(getIngestWorkerLimit()).toBe(2)
   })

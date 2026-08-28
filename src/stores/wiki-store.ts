@@ -185,9 +185,8 @@ interface EmbeddingConfig {
  * `concurrency` bounds parallel caption requests during ingest.
  * 30-image PDFs with sequential captioning at ~10s/image (a Qwen3
  * thinking model on consumer GPU) take 5 minutes. At concurrency=4
- * that drops to ~75s. Going wider than 8 typically just queues
- * behind a single-GPU server's batch slot, so we cap the slider
- * UI at a tasteful max in the settings view.
+ * that drops to ~75s. Higher values are available for hosted or
+ * multi-GPU endpoints that can sustain broader parallelism.
  */
 /**
  * Global outbound HTTP proxy. When `enabled` and `url` is a valid

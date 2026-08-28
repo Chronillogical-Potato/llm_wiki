@@ -646,7 +646,7 @@
         "overlapChunkChars": "Sovrapposizione (caratteri)",
         "overlapChunkCharsHint": "Caratteri di sovrapposizione tra chunk adiacenti, così i concetti non vengono spezzati ai bordi.",
         "concurrency": "Richieste in parallelo",
-        "concurrencyHint": "Numero massimo di richieste di embedding contemporanee (1–32). Aumentalo gradualmente in base alla capacità del tuo endpoint.",
+        "concurrencyHint": "Numero massimo di richieste di embedding contemporanee (1–64). Aumentalo gradualmente in base alla capacità del tuo endpoint.",
         "batchSize": "Input per richiesta",
         "batchSizeHint": "Solo endpoint compatibili OpenAI (1–64). I provider non supportati usano automaticamente richieste a input singolo.",
         "providerTests": "Test del provider",

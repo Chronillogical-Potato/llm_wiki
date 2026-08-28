@@ -41,6 +41,7 @@ import { writeFile, readFile, createDirectory, fileExists, readFileAsBase64 } fr
 import { captionImage } from "@/lib/vision-caption"
 import type { LlmConfig } from "@/stores/wiki-store"
 import { normalizePath } from "@/lib/path-utils"
+import { clampUserConcurrency } from "@/lib/concurrency-limits"
 
 interface CaptionEntry {
   caption: string
@@ -370,7 +371,7 @@ export async function captionMarkdownImages(
     uniqueRefs.push(ref)
   }
 
-  const concurrency = Math.max(1, options?.concurrency ?? 1)
+  const concurrency = clampUserConcurrency(options?.concurrency ?? 1)
   const total = uniqueRefs.length
   let completed = 0
 

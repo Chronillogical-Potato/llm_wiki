@@ -646,7 +646,7 @@
         "overlapChunkChars": "Overlap (characters)",
         "overlapChunkCharsHint": "Characters of overlap between adjacent chunks so ideas aren't severed at boundaries.",
         "concurrency": "Concurrent requests",
-        "concurrencyHint": "Maximum embedding requests in flight (1–32). Increase gradually according to your endpoint's capacity.",
+        "concurrencyHint": "Maximum embedding requests in flight (1–64). Increase gradually according to your endpoint's capacity.",
         "batchSize": "Inputs per request",
         "batchSizeHint": "OpenAI-compatible endpoints only (1–64). Unsupported providers automatically use single-input requests.",
         "providerTests": "Provider tests",
