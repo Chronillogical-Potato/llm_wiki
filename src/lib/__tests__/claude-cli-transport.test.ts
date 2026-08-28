@@ -30,6 +30,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 import {
   createClaudeCodeStreamParser,
   buildExitError,
+  extractClaudeCodeStructuredError,
   streamClaudeCodeCli,
 } from "../claude-cli-transport"
 import { useWikiStore } from "@/stores/wiki-store"
@@ -448,6 +449,12 @@ describe("buildExitError", () => {
     expect(msg).toMatch(/not authenticated/i)
   })
 
+  it("recognizes OAuth authentication failures emitted on stdout", () => {
+    const msg = buildExitError(1, "", "Failed to authenticate: OAuth session expired")
+    expect(msg).toMatch(/not authenticated/i)
+    expect(msg).toContain("OAuth session expired")
+  })
+
   it("falls back to unparsed stdout when stderr is empty (the real-user case)", () => {
     // Real-user scenario: claude exit 1, stderr empty, but stdout
     // had a structured error event our parser didn't recognize.
@@ -455,8 +462,8 @@ describe("buildExitError", () => {
     // and had to grep the binary to guess what went wrong.
     const stdout = '{"type":"error","subtype":"oauth_expired","message":"token revoked"}'
     const msg = buildExitError(1, "", stdout)
-    expect(msg).toContain("code 1")
-    expect(msg).toContain("no stderr")
+    expect(msg).toMatch(/not authenticated/i)
+    expect(msg).toContain("`claude`")
     expect(msg).toContain("oauth_expired")
     expect(msg).toContain("token revoked")
   })
@@ -472,5 +479,30 @@ describe("buildExitError", () => {
     expect(msg).toMatch(/silently/)
     expect(msg).toMatch(/terminal/)
     expect(msg).toMatch(/Anthropic API/)
+  })
+})
+
+describe("extractClaudeCodeStructuredError", () => {
+  it("extracts failed result events from Claude Code", () => {
+    expect(extractClaudeCodeStructuredError(JSON.stringify({
+      type: "result",
+      is_error: true,
+      result: "Failed to authenticate: OAuth session expired",
+    }))).toBe("Failed to authenticate: OAuth session expired")
+  })
+
+  it("ignores successful result events", () => {
+    expect(extractClaudeCodeStructuredError(JSON.stringify({
+      type: "result",
+      is_error: false,
+      result: "done",
+    }))).toBeNull()
+  })
+
+  it("extracts nested error messages", () => {
+    expect(extractClaudeCodeStructuredError(JSON.stringify({
+      type: "error",
+      error: { message: "rate limit exceeded" },
+    }))).toBe("rate limit exceeded")
   })
 })

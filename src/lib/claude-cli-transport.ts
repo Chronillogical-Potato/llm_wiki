@@ -99,6 +99,37 @@ export function createClaudeCodeStreamParser() {
   }
 }
 
+export function extractClaudeCodeStructuredError(rawLine: string): string | null {
+  const line = rawLine.trim()
+  if (!line) return null
+  try {
+    const value = JSON.parse(line) as unknown
+    if (!value || typeof value !== "object") return null
+    const event = value as Record<string, unknown>
+    if (event.type === "result" && event.is_error === true) {
+      for (const key of ["result", "error", "message"] as const) {
+        if (typeof event[key] === "string" && event[key].trim()) return event[key].trim()
+      }
+      return "Claude Code CLI returned an unspecified error result."
+    }
+    if (event.type === "error") {
+      for (const key of ["error", "message", "result"] as const) {
+        const field = event[key]
+        if (typeof field === "string" && field.trim()) return field.trim()
+        if (field && typeof field === "object") {
+          const nested = field as Record<string, unknown>
+          if (typeof nested.message === "string" && nested.message.trim()) {
+            return nested.message.trim()
+          }
+        }
+      }
+    }
+  } catch {
+    return null
+  }
+  return null
+}
+
 // Tauri's `invoke` typing requires the payload object to satisfy
 // `Record<string, unknown>` (an index signature). Plain interfaces
 // don't provide one, so we use a `type` alias with the explicit
@@ -150,6 +181,7 @@ export async function streamClaudeCodeCli(
   // Track whether any assistant text was received — used to detect the
   // silent-exit case where the CLI exits 0 but emits no content.
   let emittedToken = false
+  let structuredError = ""
   // Completion promise: resolves when finishWith() fires so the caller
   // awaits the full round-trip rather than returning after spawn.
   let resolveCompletion: () => void = () => {}
@@ -213,6 +245,8 @@ export async function streamClaudeCodeCli(
     // The active-project guard above is intentionally earlier: without
     // a valid project CWD we will not spawn, so no CLI events can race.
     unlistenData = await listen<string>(`claude-cli:${streamId}`, (event) => {
+      const eventError = extractClaudeCodeStructuredError(event.payload)
+      if (eventError) structuredError = eventError
       const token = parse(event.payload)
       if (token !== null) {
         emittedToken = true
@@ -238,9 +272,11 @@ export async function streamClaudeCodeCli(
         if (code !== null && code !== undefined && code !== 0) {
           finishWith(() =>
             onError(
-              new Error(buildExitError(code, stderr, unparsedLines.join("\n"))),
+              new Error(buildExitError(code, stderr, structuredError || unparsedLines.join("\n"))),
             ),
           )
+        } else if (structuredError) {
+          finishWith(() => onError(new Error(buildExitError(code ?? 1, stderr, structuredError))))
         } else if (!emittedToken) {
           // CLI exited successfully but produced no assistant text.
           // Surface this as an explicit error so the ingest pipeline
@@ -330,13 +366,14 @@ export function buildExitError(
   stderr: string,
   unparsedStdout: string = "",
 ): string {
-  if (/unauthenticated|please.*log\s*in|authentication.*failed/i.test(stderr)) {
+  const diagnostic = [stderr, unparsedStdout].filter(Boolean).join("\n")
+  if (/unauthenticated|failed\s+to\s+authenticate|please.*log\s*in|authentication.*failed|oauth.*(?:expired|revoked)/i.test(diagnostic)) {
     return [
       "Claude Code CLI is not authenticated.",
       "Please open a terminal and run `claude` to complete the OAuth login,",
       "then retry. (LLM Wiki only spawns the binary — it can't run the",
       "login flow on your behalf.)",
-      stderr ? `\n\n— stderr —\n${stderr}` : "",
+      diagnostic ? `\n\n— diagnostic —\n${diagnostic}` : "",
     ].join(" ").trim()
   }
   if (stderr) {
