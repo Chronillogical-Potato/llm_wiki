@@ -1,6 +1,5 @@
 import { invoke } from "@tauri-apps/api/core"
 import { normalizePath } from "@/lib/path-utils"
-import { useWikiStore } from "@/stores/wiki-store"
 
 export interface ImageRef {
   url: string
@@ -65,7 +64,6 @@ export async function searchWiki(
 ): Promise<SearchResult[]> {
   if (!query.trim()) return []
   const pp = normalizePath(projectPath)
-  const embCfg = useWikiStore.getState().embeddingConfig
 
   const response = await invoke<BackendSearchResponse>("search_project", {
     projectPath: pp,
@@ -73,7 +71,10 @@ export async function searchWiki(
     topK: 20,
     includeContent: false,
     queryEmbedding: null,
-    embeddingConfig: embCfg,
+    // The Security+ profile is intentionally lexical/local. Keeping this
+    // explicit prevents a saved upstream embedding endpoint from becoming
+    // an accidental native egress path.
+    embeddingConfig: null,
   })
 
   return response.results.map((result) => ({

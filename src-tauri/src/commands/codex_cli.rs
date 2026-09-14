@@ -14,7 +14,8 @@ use std::sync::{
 use std::time::Duration;
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, State};
+use serde_json::Value;
+use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
@@ -137,7 +138,7 @@ pub async fn codex_cli_spawn(
     stream_id: String,
     model: String,
     prompt: String,
-    isolate_local_config: bool,
+    _isolate_local_config: bool,
     timeout_minutes: Option<u64>,
     working_directory: Option<String>,
 ) -> Result<(), String> {
@@ -145,7 +146,7 @@ pub async fn codex_cli_spawn(
         return Err("No prompt to send to codex CLI".to_string());
     }
 
-    let working_directory = resolve_codex_working_directory(working_directory).await?;
+    let working_directory = resolve_codex_working_directory(&app, working_directory).await?;
     let codex = find_codex_command().await?;
     let mut cmd = Command::new(&codex);
     suppress_windows_console(&mut cmd);
@@ -154,7 +155,7 @@ pub async fn codex_cli_spawn(
     if let Some(path_env) = child_path_env().await {
         cmd.env("PATH", path_env);
     }
-    cmd.args(build_codex_cli_args(&model, isolate_local_config));
+    cmd.args(build_codex_cli_args(&model, true));
     cmd.current_dir(&working_directory);
 
     cmd.stdin(Stdio::piped())
@@ -293,15 +294,12 @@ fn codex_spawn_timeout_minutes(value: Option<u64>) -> u64 {
     )
 }
 
-fn build_codex_cli_args(model: &str, isolate_local_config: bool) -> Vec<String> {
+fn build_codex_cli_args(model: &str, _isolate_local_config: bool) -> Vec<String> {
     let mut args = vec!["-a".to_string(), "never".to_string(), "exec".to_string()];
-
-    if isolate_local_config {
-        args.extend([
-            "--ignore-user-config".to_string(),
-            "--ignore-rules".to_string(),
-        ]);
-    }
+    args.extend([
+        "--ignore-user-config".to_string(),
+        "--ignore-rules".to_string(),
+    ]);
 
     args.extend([
         "--json".to_string(),
@@ -316,7 +314,16 @@ fn build_codex_cli_args(model: &str, isolate_local_config: bool) -> Vec<String> 
     args
 }
 
-async fn resolve_codex_working_directory(value: Option<String>) -> Result<PathBuf, String> {
+async fn resolve_codex_working_directory(
+    app: &AppHandle,
+    value: Option<String>,
+) -> Result<PathBuf, String> {
+    let canonical = resolve_candidate_working_directory(value).await?;
+    ensure_registered_project(app, &canonical).await?;
+    Ok(canonical)
+}
+
+async fn resolve_candidate_working_directory(value: Option<String>) -> Result<PathBuf, String> {
     let raw = value
         .as_deref()
         .map(str::trim)
@@ -327,13 +334,13 @@ async fn resolve_codex_working_directory(value: Option<String>) -> Result<PathBu
     if !path.is_absolute() {
         return Err("Codex CLI working directory must be an absolute project path".to_string());
     }
-    let path_meta = tokio::fs::metadata(path).await.map_err(|e| {
+    let path_meta = tokio::fs::symlink_metadata(path).await.map_err(|e| {
         eprintln!("[codex-cli] failed to read working directory metadata {raw}: {e}");
         format!("Codex CLI working directory does not exist or cannot be read: {raw}")
     })?;
-    if !path_meta.is_dir() {
+    if path_meta.file_type().is_symlink() || !path_meta.is_dir() {
         return Err(format!(
-            "Codex CLI working directory is not a directory: {raw}"
+            "Codex CLI working directory must be a registered, non-symlink project directory: {raw}"
         ));
     }
     let index_path = path.join("wiki").join("index.md");
@@ -349,6 +356,46 @@ async fn resolve_codex_working_directory(value: Option<String>) -> Result<PathBu
     tokio::fs::canonicalize(path)
         .await
         .map_err(|e| format!("Failed to canonicalize Codex CLI working directory {raw}: {e}"))
+}
+
+async fn ensure_registered_project(app: &AppHandle, candidate: &Path) -> Result<(), String> {
+    let store_path = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to resolve LLM Wiki application data: {e}"))?
+        .join("app-state.json");
+    let raw = tokio::fs::read_to_string(&store_path)
+        .await
+        .map_err(|e| format!("Failed to read the registered project list: {e}"))?;
+    let parsed: Value = serde_json::from_str(&raw)
+        .map_err(|e| format!("Registered project list is invalid: {e}"))?;
+    let registry = parsed
+        .get("projectRegistry")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "No registered projects are available".to_string())?;
+
+    for (project_id, value) in registry {
+        let Some(path) = value.get("path").and_then(Value::as_str) else {
+            continue;
+        };
+        let Ok(registered) = tokio::fs::canonicalize(path).await else {
+            continue;
+        };
+        if registered != candidate {
+            continue;
+        }
+        let project_manifest = candidate.join(".llm-wiki/project.json");
+        let manifest_raw = tokio::fs::read_to_string(project_manifest)
+            .await
+            .map_err(|e| format!("Registered project manifest is unavailable: {e}"))?;
+        let manifest: Value = serde_json::from_str(&manifest_raw)
+            .map_err(|e| format!("Registered project manifest is invalid: {e}"))?;
+        if manifest.get("id").and_then(Value::as_str) != Some(project_id.as_str()) {
+            return Err("Registered project UUID does not match its project manifest".to_string());
+        }
+        return Ok(());
+    }
+    Err("Codex CLI working directory is not a registered LLM Wiki project".to_string())
 }
 
 #[tauri::command]
@@ -410,7 +457,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_args_do_not_isolate_local_config_by_default() {
+    fn codex_args_always_isolate_local_config_and_rules() {
         let args = build_codex_cli_args("gpt-5", false);
 
         assert!(args
@@ -418,8 +465,8 @@ mod tests {
             .any(|pair| pair[0] == "-a" && pair[1] == "never" && pair[2] == "exec"));
         assert!(args.contains(&"--model".to_string()));
         assert!(args.contains(&"gpt-5".to_string()));
-        assert!(!args.contains(&"--ignore-user-config".to_string()));
-        assert!(!args.contains(&"--ignore-rules".to_string()));
+        assert!(args.contains(&"--ignore-user-config".to_string()));
+        assert!(args.contains(&"--ignore-rules".to_string()));
     }
 
     #[test]
@@ -449,20 +496,20 @@ mod tests {
 
     #[tokio::test]
     async fn codex_working_directory_requires_absolute_existing_project() {
-        assert!(resolve_codex_working_directory(None)
+        assert!(resolve_candidate_working_directory(None)
             .await
             .unwrap_err()
             .contains("requires an active project"));
-        assert!(resolve_codex_working_directory(Some("".to_string()))
+        assert!(resolve_candidate_working_directory(Some("".to_string()))
             .await
             .unwrap_err()
             .contains("requires an active project"));
-        assert!(resolve_codex_working_directory(Some("   ".to_string()))
+        assert!(resolve_candidate_working_directory(Some("   ".to_string()))
             .await
             .unwrap_err()
             .contains("requires an active project"));
         assert!(
-            resolve_codex_working_directory(Some("relative/project".to_string()))
+            resolve_candidate_working_directory(Some("relative/project".to_string()))
                 .await
                 .unwrap_err()
                 .contains("absolute")
@@ -472,7 +519,7 @@ mod tests {
             std::env::temp_dir().join(format!("llm-wiki-codex-cli-missing-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&missing);
         assert!(
-            resolve_codex_working_directory(Some(missing.to_string_lossy().to_string()))
+            resolve_candidate_working_directory(Some(missing.to_string_lossy().to_string()))
                 .await
                 .unwrap_err()
                 .contains("does not exist or cannot be read")
@@ -490,10 +537,10 @@ mod tests {
         }
         let _file_guard = TestFile(file_path.clone());
         assert!(
-            resolve_codex_working_directory(Some(file_path.to_string_lossy().to_string()))
+            resolve_candidate_working_directory(Some(file_path.to_string_lossy().to_string()))
                 .await
                 .unwrap_err()
-                .contains("not a directory")
+                .contains("non-symlink project directory")
         );
 
         let dir =
@@ -502,7 +549,7 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("tempdir");
         let _guard = TestDir(dir.clone());
         assert!(
-            resolve_codex_working_directory(Some(dir.to_string_lossy().to_string()))
+            resolve_candidate_working_directory(Some(dir.to_string_lossy().to_string()))
                 .await
                 .unwrap_err()
                 .contains("wiki/index.md")
@@ -513,14 +560,14 @@ mod tests {
         let index_dir = wiki_dir.join("index.md");
         std::fs::create_dir_all(&index_dir).expect("index dir");
         assert!(
-            resolve_codex_working_directory(Some(dir.to_string_lossy().to_string()))
+            resolve_candidate_working_directory(Some(dir.to_string_lossy().to_string()))
                 .await
                 .unwrap_err()
                 .contains("wiki/index.md")
         );
         std::fs::remove_dir_all(&index_dir).expect("remove index dir");
         std::fs::write(wiki_dir.join("index.md"), "# Index\n").expect("index");
-        let resolved = resolve_codex_working_directory(Some(dir.to_string_lossy().to_string()))
+        let resolved = resolve_candidate_working_directory(Some(dir.to_string_lossy().to_string()))
             .await
             .expect("valid project path");
         assert_eq!(resolved, dir.canonicalize().expect("canonical tempdir"));

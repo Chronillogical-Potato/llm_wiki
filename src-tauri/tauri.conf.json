@@ -5,7 +5,7 @@
   "identifier": "com.llmwiki.app",
   "build": {
     "beforeDevCommand": "npm run dev",
-    "devUrl": "http://localhost:1420",
+    "devUrl": "http://127.0.0.1:1420",
     "beforeBuildCommand": "npm run build:desktop",
     "frontendDist": "../dist"
   },
@@ -22,10 +22,10 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' https: http:; img-src 'self' asset: http://asset.localhost https://asset.localhost blob: data:; media-src 'self' asset: http://asset.localhost https://asset.localhost; style-src 'self' 'unsafe-inline'",
+      "csp": "default-src 'self'; connect-src 'self' http://127.0.0.1:19828 ws://127.0.0.1:1421; img-src 'self' asset: http://asset.localhost https://asset.localhost blob: data:; media-src 'self' asset: http://asset.localhost https://asset.localhost; style-src 'self' 'unsafe-inline'",
       "assetProtocol": {
         "enable": true,
-        "scope": ["**"]
+        "scope": []
       }
     }
   },

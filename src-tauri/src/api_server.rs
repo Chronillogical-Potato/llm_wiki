@@ -17,11 +17,12 @@ use uuid::Uuid;
 use walkdir::WalkDir;
 
 use crate::cors::{local_cors_headers, request_origin};
-use crate::{agent, clip_server, commands, server_bind};
+use crate::{agent, commands, runtime_auth, server_bind, study};
 
 const PORT: u16 = 19828;
 const API_PREFIX: &str = "/api/v1";
-const MAX_BODY_BYTES: usize = 1024 * 1024;
+const MAX_BODY_BYTES: usize = 256 * 1024;
+const MAX_LEARNER_EVENT_BODY_BYTES: usize = 64 * 1024;
 const MAX_CHAT_BODY_BYTES: usize = 40 * 1024 * 1024;
 const MAX_FILE_CONTENT_BYTES: u64 = 2 * 1024 * 1024;
 const DEFAULT_MAX_FILES: usize = 2_000;
@@ -34,7 +35,7 @@ const MAX_BIND_RETRIES: u32 = 3;
 const APP_STATE_CACHE_TTL: Duration = Duration::from_secs(5);
 const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(1);
 const RATE_LIMIT_MAX_REQUESTS: usize = 120;
-const MAX_IN_FLIGHT_REQUESTS: usize = 64;
+const MAX_IN_FLIGHT_REQUESTS: usize = 16;
 const MAX_IN_FLIGHT_CHAT_STREAMS: usize = 8;
 const MAX_IN_FLIGHT_PAGE_EMBEDS: usize = 4;
 const SSE_QUEUE_CAPACITY: usize = 64;
@@ -207,54 +208,36 @@ fn process_request(app: AppHandle, mut request: tiny_http::Request) {
         })
         .collect();
 
-    let body = match read_body(&mut request, body_limit_for_request(&method, &url)) {
-        Ok(body) => body,
-        Err(err) => {
-            respond_error(request, 400, &err, origin.as_deref());
-            return;
-        }
-    };
-
     let (path, query) = split_url(&url);
-    if wants_streaming_chat(&method, &path, &body, &headers) {
-        if !api_enabled(&app) {
-            respond_error(
-                request,
-                503,
-                "API server is disabled in Settings → API Server",
-                origin.as_deref(),
-            );
-            return;
-        }
-        // Agent chat remains token-protected even when read-oriented API
-        // endpoints are configured for unauthenticated local access.
-        if !is_token_authorized(&app, query, &headers) {
-            respond_error(request, 401, "Unauthorized", origin.as_deref());
-            return;
-        }
-        let Some(project_id) = chat_project_id(&method, &path) else {
-            respond_error(request, 404, "Not found", origin.as_deref());
-            return;
-        };
-        let Some(stream_slot) = try_acquire_chat_stream_slot() else {
-            respond_error(
-                request,
-                503,
-                "Too many concurrent Agent chat streams",
-                origin.as_deref(),
-            );
-            return;
-        };
-        respond_chat_sse(
-            request,
-            app,
-            project_id,
-            &body,
-            origin.as_deref(),
-            stream_slot,
-        );
+    if is_health_path(&path) {
+        let response = handle_request(&app, &method, &url, "", &headers);
+        respond_json(request, response.status, response.body, origin.as_deref());
         return;
     }
+    if !path.starts_with(API_PREFIX) {
+        respond_error(request, 404, "Not found", origin.as_deref());
+        return;
+    }
+    if !is_authorized(&app, query, &headers) {
+        respond_error(request, 401, "Unauthorized", origin.as_deref());
+        return;
+    }
+    if !matches!(&method, &Method::Get | &Method::Post | &Method::Patch) {
+        respond_error(request, 405, "Method not allowed", origin.as_deref());
+        return;
+    }
+
+    let body = if matches!(&method, &Method::Post | &Method::Patch) {
+        match read_body(&mut request, body_limit_for_request(&method, &url)) {
+            Ok(body) => body,
+            Err(err) => {
+                respond_error(request, 400, &err, origin.as_deref());
+                return;
+            }
+        }
+    } else {
+        String::new()
+    };
 
     let response = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         handle_request(&app, &method, &url, &body, &headers)
@@ -290,43 +273,14 @@ fn handle_request(
     headers: &[(String, String)],
 ) -> ApiResponse {
     let (path, query) = split_url(url);
-    if path == "/health" || path == format!("{API_PREFIX}/health") {
-        // /health stays reachable even when the user has disabled the
-        // API in Settings — the desktop UI uses it to render the
-        // "Enabled / disabled / port_conflict" line, and curl-from-
-        // terminal users need a way to confirm the server is alive
-        // before they go hunting for why other endpoints 503.
+    if is_health_path(&path) {
         return ok(json!({
             "ok": true,
             "status": get_api_status(),
-            "version": env!("CARGO_PKG_VERSION"),
-            "authRequired": api_auth_required(app),
-            "authConfigured": api_token(app).is_some(),
-            "tokenSource": api_token_source(app),
-            "enabled": api_enabled(app),
-            "mcpEnabled": api_mcp_enabled(app),
-            "allowUnauthenticated": api_allow_unauthenticated(app),
-            "allowLanAccess": api_allow_lan_access(app),
-            "agent": {
-                "chat": true,
-                "streaming": true,
-                "streamProtocol": "sse",
-            },
         }));
     }
     if !path.starts_with(API_PREFIX) {
         return err(404, "Not found");
-    }
-    if !api_enabled(app) {
-        // Kill-switch path: token may be configured and valid, but the
-        // user toggled the API off in Settings → API Server. 503 is
-        // the right code semantically ("temporarily unavailable")
-        // and tells well-behaved clients to back off rather than
-        // retry instantly the way 401 would.
-        return err(503, "API server is disabled in Settings → API Server");
-    }
-    if is_token_required_request(&method, &path) && !is_token_authorized(app, query, headers) {
-        return err(401, "Unauthorized");
     }
     if !is_authorized(app, query, headers) {
         return err(401, "Unauthorized");
@@ -341,33 +295,21 @@ fn handle_request(
 
     match (method, parts.as_slice()) {
         (&Method::Get, ["projects"]) => handle_projects(app),
-        (&Method::Get, ["projects", project_id, "files"]) => handle_files(app, project_id, query),
-        (&Method::Get, ["projects", project_id, "files", "content"]) => {
-            handle_file_content(app, project_id, query)
+        (&Method::Get, ["projects", project_id, "study", "next"]) => {
+            handle_study_next(app, project_id, query)
         }
-        (&Method::Get, ["projects", project_id, "reviews"]) => {
-            handle_reviews(app, project_id, query)
+        (&Method::Post, ["projects", project_id, "learner-events"]) => {
+            handle_learner_event(app, project_id, body, headers)
         }
-        (&Method::Post, ["projects", project_id, "reviews", "resolve"]) => {
-            handle_bulk_resolve_reviews(app, project_id, body)
-        }
-        (&Method::Patch, ["projects", project_id, "reviews", review_id]) => {
-            handle_patch_review(app, project_id, review_id, body)
-        }
-        (&Method::Post, ["projects", project_id, "search"]) => handle_search(app, project_id, body),
-        (&Method::Get, ["projects", project_id, "graph"]) => handle_graph(app, project_id, query),
-        (&Method::Post, ["projects", project_id, "sources", "rescan"]) => {
-            handle_rescan(app, project_id)
-        }
-        (&Method::Post, ["projects", project_id, "pages", "embed"]) => {
-            handle_embed_page(app, project_id, body)
-        }
-        (&Method::Post, ["projects", project_id, "chat"]) => handle_chat(app, project_id, body),
-        (&Method::Post, ["projects", project_id, "chat", session_id, "cancel"]) => {
-            handle_cancel_chat(app, project_id, session_id)
+        (&Method::Get, ["projects", project_id, "learner-state"]) => {
+            handle_learner_state(app, project_id, query)
         }
         _ => err(404, "Not found"),
     }
+}
+
+fn is_health_path(path: &str) -> bool {
+    path == "/health" || path == format!("{API_PREFIX}/health")
 }
 
 fn should_rate_limit(method: &Method, url: &str) -> bool {
@@ -375,7 +317,7 @@ fn should_rate_limit(method: &Method, url: &str) -> bool {
         return false;
     }
     let (path, _) = split_url(url);
-    !(path == "/health" || path == format!("{API_PREFIX}/health"))
+    !is_health_path(&path)
 }
 
 fn allow_request() -> bool {
@@ -472,6 +414,13 @@ fn body_limit_for_request(method: &Method, url: &str) -> usize {
     if method == &Method::Post
         && parts
             .as_deref()
+            .map(|parts| matches!(parts, ["projects", _, "learner-events"]))
+            .unwrap_or(false)
+    {
+        MAX_LEARNER_EVENT_BODY_BYTES
+    } else if method == &Method::Post
+        && parts
+            .as_deref()
             .map(|parts| matches!(parts, ["projects", _, "chat"]))
             .unwrap_or(false)
     {
@@ -520,7 +469,7 @@ fn respond_json(request: tiny_http::Request, status: u16, body: Value, origin: O
 }
 
 fn cors_headers(origin: Option<&str>) -> Vec<Header> {
-    local_cors_headers(origin, "Content-Type, Authorization, X-LLM-Wiki-Token")
+    local_cors_headers(origin, "Content-Type, Authorization, Idempotency-Key")
 }
 
 fn split_url(url: &str) -> (String, &str) {
@@ -557,33 +506,19 @@ fn percent_decode(input: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-fn is_authorized(app: &AppHandle, query: &str, headers: &[(String, String)]) -> bool {
-    if !api_auth_required(app) {
-        return true;
-    }
-    is_token_authorized(app, query, headers)
+fn is_authorized(app: &AppHandle, _query: &str, headers: &[(String, String)]) -> bool {
+    is_token_authorized(app, "", headers)
 }
 
 pub(crate) fn is_token_authorized(
-    app: &AppHandle,
-    query: &str,
+    _app: &AppHandle,
+    _query: &str,
     headers: &[(String, String)],
 ) -> bool {
-    let Some(token) = api_token(app) else {
+    let Some(token) = runtime_auth::token() else {
         return false;
     };
-    let params = parse_query(query);
-    if params
-        .get("token")
-        .map(|v| constant_time_eq(v.as_bytes(), token.as_bytes()))
-        .unwrap_or(false)
-    {
-        return true;
-    }
     headers.iter().any(|(key, value)| {
-        if key == "x-llm-wiki-token" {
-            return constant_time_eq(value.as_bytes(), token.as_bytes());
-        }
         if key == "authorization" {
             return value
                 .strip_prefix("Bearer ")
@@ -595,67 +530,32 @@ pub(crate) fn is_token_authorized(
 }
 
 fn api_token(app: &AppHandle) -> Option<String> {
-    if let Ok(token) = std::env::var("LLM_WIKI_API_TOKEN") {
-        let trimmed = token.trim();
-        if !trimmed.is_empty() {
-            return Some(trimmed.to_string());
-        }
-    }
-    let parsed = load_app_state(app)?;
-    parsed
-        .get("apiConfig")
-        .and_then(|v| v.get("token"))
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .map(ToOwned::to_owned)
+    let _ = app;
+    runtime_auth::token().map(ToOwned::to_owned)
 }
 
 fn api_token_source(app: &AppHandle) -> &'static str {
-    if let Ok(token) = std::env::var("LLM_WIKI_API_TOKEN") {
-        if !token.trim().is_empty() {
-            return "env";
-        }
+    let _ = app;
+    if runtime_auth::token().is_some() {
+        "runtime"
+    } else {
+        "none"
     }
-    if load_app_state(app)
-        .and_then(|parsed| {
-            parsed
-                .get("apiConfig")
-                .and_then(|v| v.get("token"))
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())
-                .map(|_| ())
-        })
-        .is_some()
-    {
-        return "store";
-    }
-    "none"
 }
 
 fn api_auth_required(app: &AppHandle) -> bool {
-    !api_allow_unauthenticated(app)
+    let _ = app;
+    true
 }
 
 fn api_allow_unauthenticated(app: &AppHandle) -> bool {
-    let Some(parsed) = load_app_state(app) else {
-        return false;
-    };
-    parsed
-        .get("apiConfig")
-        .and_then(|v| v.get("allowUnauthenticated"))
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
+    let _ = app;
+    false
 }
 
 fn api_allow_lan_access(app: &AppHandle) -> bool {
-    let Some(parsed) = load_app_state(app) else {
-        return false;
-    };
-    parsed
-        .get("apiConfig")
-        .and_then(|v| v.get("allowLanAccess"))
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
+    let _ = app;
+    false
 }
 
 /// Whether the API server should accept non-/health requests.
@@ -666,25 +566,13 @@ fn api_allow_lan_access(app: &AppHandle) -> bool {
 /// "enabled + no token = 401" which is fail-closed by virtue of the
 /// missing token, not the enable flag.
 fn api_enabled(app: &AppHandle) -> bool {
-    let Some(parsed) = load_app_state(app) else {
-        return true;
-    };
-    parsed
-        .get("apiConfig")
-        .and_then(|v| v.get("enabled"))
-        .and_then(Value::as_bool)
-        .unwrap_or(true)
+    let _ = app;
+    true
 }
 
 fn api_mcp_enabled(app: &AppHandle) -> bool {
-    let Some(parsed) = load_app_state(app) else {
-        return false;
-    };
-    parsed
-        .get("apiConfig")
-        .and_then(|v| v.get("mcpEnabled"))
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
+    let _ = app;
+    false
 }
 
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
@@ -701,21 +589,18 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 fn load_app_state(app: &AppHandle) -> Option<Value> {
     let now = Instant::now();
     let lock = APP_STATE_CACHE.get_or_init(|| Mutex::new(None));
-    let mut previous = None;
     if let Ok(cache) = lock.lock() {
         if let Some(cached) = cache.as_ref() {
             if now.duration_since(cached.loaded_at) < APP_STATE_CACHE_TTL {
                 return cached.value.clone();
             }
-            previous = cached.value.clone();
         }
     }
 
     let path = app.path().app_data_dir().ok()?.join("app-state.json");
-    let loaded = fs::read_to_string(path)
-        .ok()
-        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
-    let value = loaded.or(previous);
+    // This document is the project authorization registry. Availability
+    // caching must not turn a read/parse failure into stale authorization.
+    let value = load_authoritative_app_state(&path);
 
     if let Ok(mut cache) = lock.lock() {
         *cache = Some(CachedAppState {
@@ -724,6 +609,11 @@ fn load_app_state(app: &AppHandle) -> Option<Value> {
         });
     }
     value
+}
+
+fn load_authoritative_app_state(path: &Path) -> Option<Value> {
+    let raw = fs::read_to_string(path).ok()?;
+    serde_json::from_str::<Value>(&raw).ok()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -736,106 +626,144 @@ struct ProjectEntry {
 
 fn handle_projects(app: &AppHandle) -> ApiResponse {
     let projects = load_projects(app);
-    let current_project = projects.iter().find(|project| project.current).cloned();
+    let public_projects: Vec<Value> = projects
+        .iter()
+        .map(|project| {
+            json!({
+                "id": project.id,
+                "name": project.name,
+                "current": project.current,
+            })
+        })
+        .collect();
+    let current_project = projects
+        .iter()
+        .find(|project| project.current)
+        .map(|project| json!({ "id": project.id, "name": project.name, "current": true }));
     ok(json!({
         "ok": true,
-        "projects": projects,
+        "projects": public_projects,
         "currentProject": current_project,
     }))
 }
 
+fn handle_study_next(app: &AppHandle, project_id: &str, query: &str) -> ApiResponse {
+    let project = match resolve_project(app, project_id) {
+        Ok(project) => project,
+        Err(error) => return err(404, error),
+    };
+    let limit = parse_query(query)
+        .get("limit")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(10)
+        .clamp(1, 50);
+    match study::next_questions(Path::new(&project.path), limit) {
+        Ok(body) => ok(body),
+        Err(error) => err(error.status, error.message),
+    }
+}
+
+fn handle_learner_event(
+    app: &AppHandle,
+    project_id: &str,
+    body: &str,
+    headers: &[(String, String)],
+) -> ApiResponse {
+    let project = match resolve_project(app, project_id) {
+        Ok(project) => project,
+        Err(error) => return err(404, error),
+    };
+    let Some(idempotency_key) = header_value(headers, "idempotency-key") else {
+        return err(400, "Idempotency-Key header is required");
+    };
+    match study::record_attempt(Path::new(&project.path), body, idempotency_key) {
+        Ok(response) => ok(response),
+        Err(error) => err(error.status, error.message),
+    }
+}
+
+fn handle_learner_state(app: &AppHandle, project_id: &str, query: &str) -> ApiResponse {
+    let project = match resolve_project(app, project_id) {
+        Ok(project) => project,
+        Err(error) => return err(404, error),
+    };
+    let params = parse_query(query);
+    let concept_id = params
+        .get("conceptId")
+        .map(String::as_str)
+        .filter(|value| !value.trim().is_empty());
+    match study::learner_state(Path::new(&project.path), concept_id) {
+        Ok(response) => ok(response),
+        Err(error) => err(error.status, error.message),
+    }
+}
+
+fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.as_str())
+}
+
 fn load_projects(app: &AppHandle) -> Vec<ProjectEntry> {
-    let current = normalize_path(&clip_server::current_project_path());
-    let mut by_path: BTreeMap<String, ProjectEntry> = BTreeMap::new();
-
-    if let Some(parsed) = load_app_state(app) {
-        if let Some(registry) = parsed.get("projectRegistry").and_then(Value::as_object) {
-            for (id, value) in registry {
-                let path = value.get("path").and_then(Value::as_str).unwrap_or("");
-                if path.is_empty() {
-                    continue;
-                }
-                let path = normalize_path(path);
-                let name = value
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .map(ToOwned::to_owned)
-                    .unwrap_or_else(|| project_name_from_path(&path));
-                by_path.insert(
-                    path.clone(),
-                    ProjectEntry {
-                        id: id.clone(),
-                        name,
-                        current: path == current,
-                        path,
-                    },
-                );
+    let Some(parsed) = load_app_state(app) else {
+        return Vec::new();
+    };
+    let current_id = parsed
+        .get("currentProjectId")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let Some(registry) = parsed.get("projectRegistry").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    registry
+        .iter()
+        .filter_map(|(id, value)| {
+            Uuid::parse_str(id).ok()?;
+            let path = value.get("path").and_then(Value::as_str)?.trim();
+            if path.is_empty() {
+                return None;
             }
-        }
-        if let Some(recents) = parsed.get("recentProjects").and_then(Value::as_array) {
-            for value in recents {
-                let path = value.get("path").and_then(Value::as_str).unwrap_or("");
-                if path.is_empty() {
-                    continue;
-                }
-                let path = normalize_path(path);
-                by_path.entry(path.clone()).or_insert_with(|| {
-                    let id = read_project_id(&path).unwrap_or_else(|| path.clone());
-                    let name = value
-                        .get("name")
-                        .and_then(Value::as_str)
-                        .map(ToOwned::to_owned)
-                        .unwrap_or_else(|| project_name_from_path(&path));
-                    ProjectEntry {
-                        id,
-                        name,
-                        current: path == current,
-                        path,
-                    }
-                });
-            }
-        }
-    }
-
-    for (name, path) in clip_server::all_projects() {
-        let path = normalize_path(&path);
-        by_path.entry(path.clone()).or_insert_with(|| ProjectEntry {
-            id: read_project_id(&path).unwrap_or_else(|| path.clone()),
-            name: if name.is_empty() {
-                project_name_from_path(&path)
-            } else {
-                name
-            },
-            current: path == current,
-            path,
-        });
-    }
-
-    if !current.is_empty() {
-        by_path
-            .entry(current.clone())
-            .or_insert_with(|| ProjectEntry {
-                id: read_project_id(&current).unwrap_or_else(|| current.clone()),
-                name: project_name_from_path(&current),
-                current: true,
-                path: current.clone(),
-            });
-    }
-
-    by_path.into_values().collect()
+            let path = normalize_path(path);
+            let name = value
+                .get("name")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| project_name_from_path(&path));
+            Some(ProjectEntry {
+                id: id.clone(),
+                name,
+                path,
+                current: id == current_id,
+            })
+        })
+        .collect()
 }
 
 fn resolve_project(app: &AppHandle, project_id: &str) -> Result<ProjectEntry, String> {
     let project_id = percent_decode(project_id);
-    let wants_current = project_id.eq_ignore_ascii_case("current");
-    load_projects(app)
+    Uuid::parse_str(&project_id).map_err(|_| "Project identifier must be a UUID".to_string())?;
+    let mut project = load_projects(app)
         .into_iter()
-        .find(|p| {
-            p.id == project_id
-                || project_path_matches(&p.path, &project_id)
-                || (wants_current && p.current)
-        })
-        .ok_or_else(|| format!("Unknown project: {project_id}"))
+        .find(|project| project.id == project_id)
+        .ok_or_else(|| format!("Unknown registered project: {project_id}"))?;
+    let metadata = fs::symlink_metadata(&project.path)
+        .map_err(|error| format!("Registered project is unavailable: {error}"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err("Registered project root must be a real directory, not a symlink".to_string());
+    }
+    let canonical = fs::canonicalize(&project.path)
+        .map_err(|error| format!("Failed to canonicalize registered project: {error}"))?;
+    let canonical_text = canonical
+        .to_str()
+        .ok_or_else(|| "Registered project path is not valid UTF-8".to_string())?;
+    let manifest_id = read_project_id(canonical_text)
+        .ok_or_else(|| "Registered project is missing .llm-wiki/project.json".to_string())?;
+    if manifest_id != project_id {
+        return Err("Registered project UUID does not match its project manifest".to_string());
+    }
+    project.path = canonical_text.to_string();
+    Ok(project)
 }
 
 fn project_path_matches(stored_path: &str, candidate: &str) -> bool {
@@ -2614,6 +2542,32 @@ mod tests {
         let parsed = parse_query("path=wiki%2Fhello+world.md&token=a%2Bb");
         assert_eq!(parsed.get("path").unwrap(), "wiki/hello world.md");
         assert_eq!(parsed.get("token").unwrap(), "a+b");
+    }
+
+    #[test]
+    fn authoritative_project_registry_fails_closed() {
+        let root = test_project_dir();
+        let state = root.join("app-state.json");
+        assert!(load_authoritative_app_state(&state).is_none());
+
+        fs::write(&state, "{not json").unwrap();
+        assert!(load_authoritative_app_state(&state).is_none());
+
+        fs::write(&state, r#"{"projectRegistry":{}}"#).unwrap();
+        assert_eq!(
+            load_authoritative_app_state(&state)
+                .and_then(|value| value.get("projectRegistry").cloned()),
+            Some(json!({}))
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn only_static_health_routes_bypass_authentication_and_body_reads() {
+        assert!(is_health_path("/health"));
+        assert!(is_health_path("/api/v1/health"));
+        assert!(!is_health_path("/api/v1/projects"));
+        assert!(!is_health_path("/health/extra"));
     }
 
     #[test]

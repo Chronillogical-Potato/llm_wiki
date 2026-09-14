@@ -36,7 +36,7 @@ export const useUpdateStore = create<UpdateStoreState>((set) => ({
   lastResult: null,
   lastCheckedAt: null,
   dismissedVersion: null,
-  enabled: true,
+  enabled: false,
 
   setChecking: (checking) => set({ checking }),
   setResult: (lastResult, lastCheckedAt) =>
