@@ -2,15 +2,17 @@ use std::fs;
 use std::path::Path;
 
 use chrono::Local;
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 use tauri_plugin_opener::OpenerExt;
 
 use crate::panic_guard::run_guarded;
 use crate::types::wiki::WikiProject;
 
 #[tauri::command]
-pub fn create_project(name: String, path: String) -> Result<WikiProject, String> {
-    run_guarded("create_project", || create_project_impl(name, path))
+pub fn create_project(app: AppHandle, name: String, path: String) -> Result<WikiProject, String> {
+    let project = run_guarded("create_project", || create_project_impl(name, path))?;
+    register_project_asset_scope(&app, &project.path)?;
+    Ok(project)
 }
 
 fn create_project_impl(name: String, path: String) -> Result<WikiProject, String> {
@@ -242,8 +244,8 @@ related: []
 }
 
 #[tauri::command]
-pub fn open_project(path: String) -> Result<WikiProject, String> {
-    run_guarded("open_project", || {
+pub fn open_project(app: AppHandle, path: String) -> Result<WikiProject, String> {
+    let project = run_guarded("open_project", || {
         let root = Path::new(&path);
 
         validate_wiki_project_root(root)?;
@@ -260,7 +262,18 @@ pub fn open_project(path: String) -> Result<WikiProject, String> {
             // Forward slashes for cross-platform consistency in the TS layer.
             path: path.replace('\\', "/"),
         })
-    })
+    })?;
+    register_project_asset_scope(&app, &project.path)?;
+    Ok(project)
+}
+
+fn register_project_asset_scope(app: &AppHandle, path: &str) -> Result<(), String> {
+    let canonical = Path::new(path)
+        .canonicalize()
+        .map_err(|e| format!("Failed to resolve project asset scope '{}': {}", path, e))?;
+    app.asset_protocol_scope()
+        .allow_directory(&canonical, true)
+        .map_err(|e| format!("Failed to register project asset scope: {e}"))
 }
 
 #[tauri::command]

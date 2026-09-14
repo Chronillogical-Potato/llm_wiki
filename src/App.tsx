@@ -9,10 +9,9 @@ import { useLintStore } from "@/stores/lint-store"
 import { useChatStore } from "@/stores/chat-store"
 import { BASE_FONT_SIZE_PX, useZoomStore } from "@/stores/zoom-store"
 import { openProject } from "@/commands/fs"
-import { getLastProject, getRecentProjects, saveLastProject, loadLlmConfig, loadLanguage, loadSearchApiConfig, loadEmbeddingConfig, loadMineruConfig, loadMultimodalConfig, loadOutputLanguage, loadProviderConfigs, loadCustomLlmPresets, loadActivePresetId, loadTaskModelRouting, loadProjectLlmOverride, loadProxyConfig, loadScheduledImportConfig, saveScheduledImportConfig, loadSourceWatchConfig, loadApiConfig, loadGeneralConfig, loadZoomLevel } from "@/lib/project-store"
+import { getLastProject, saveLastProject, loadLlmConfig, loadLanguage, loadSearchApiConfig, loadEmbeddingConfig, loadMineruConfig, loadMultimodalConfig, loadOutputLanguage, loadProviderConfigs, loadCustomLlmPresets, loadActivePresetId, loadTaskModelRouting, loadProjectLlmOverride, loadProxyConfig, loadScheduledImportConfig, saveScheduledImportConfig, loadSourceWatchConfig, loadApiConfig, loadGeneralConfig, loadZoomLevel } from "@/lib/project-store"
 import { loadReviewItems, loadLintItems, loadChatHistory, loadChatPreferences } from "@/lib/persist"
 import { setupAutoSave } from "@/lib/auto-save"
-import { startClipWatcher } from "@/lib/clip-watcher"
 import { DEFAULT_SOURCE_WATCH_CONFIG } from "@/lib/source-watch-config"
 import { useGlobalShortcut } from "@/hooks/use-global-shortcut"
 import { AppLayout } from "@/components/layout/app-layout"
@@ -137,10 +136,11 @@ function App() {
     }
   }
 
-  // Set up auto-save and clip watcher once on mount
+  // Set up auto-save once on mount. Clipper is deliberately disabled in the
+  // local Security+ profile, so no background poller or project-path notice is
+  // started here.
   useEffect(() => {
     setupAutoSave()
-    startClipWatcher()
   }, [])
 
   // Register global keyboard shortcuts
@@ -220,6 +220,11 @@ function App() {
   // first interaction. Silent on failure; the UI in Settings → About
   // lets the user retry manually.
   useEffect(() => {
+    // The sec-training profile has no updater or automatic WAN traffic.
+    // Releases are reviewed outside the app and incorporated explicitly.
+    const updaterEnabled = false
+    if (!updaterEnabled) return
+
     let cancelled = false
     const timer = setTimeout(async () => {
       if (cancelled) return
@@ -515,22 +520,6 @@ function App() {
           stopProjectFileSync().catch(() => {})
         }
       }).catch((err) => console.error("Failed to configure project file sync:", err))
-      // Notify local clip server of the current project + all recent projects
-      fetch("http://127.0.0.1:19827/project", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path: proj.path }),
-      }).catch(() => {})
-
-      // Send all recent projects to clip server for extension project picker
-      getRecentProjects().then((recents) => {
-        const projects = recents.map((p) => ({ name: p.name, path: p.path }))
-        fetch("http://127.0.0.1:19827/projects", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ projects }),
-        }).catch(() => {})
-      }).catch(() => {})
       // Load lightweight chat preferences before first paint so the chat
       // controls reflect the user's saved tool toggles. The heavier per-
       // conversation history load is deferred below.

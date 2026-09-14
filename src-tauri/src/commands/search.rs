@@ -296,22 +296,20 @@ pub async fn resolve_query_embedding(
     explicit_embedding: Option<Vec<f32>>,
     embedding_config: Option<SearchEmbeddingConfig>,
 ) -> Result<Option<Vec<f32>>, String> {
+    let _ = query;
     if let Some(embedding) = explicit_embedding {
         return validate_query_embedding(embedding).map(Some);
     }
-    let Some(cfg) = embedding_config else {
-        return Ok(None);
-    };
-    if !cfg.enabled || cfg.endpoint.trim().is_empty() || cfg.model.trim().is_empty() {
-        return Ok(None);
+    if embedding_config
+        .as_ref()
+        .map(|config| config.enabled)
+        .unwrap_or(false)
+    {
+        return Err(
+            "Remote embeddings are disabled by the sec-training-local-v1 profile".to_string(),
+        );
     }
-    match fetch_embedding_with_retry(query, &cfg, 0).await {
-        Ok(embedding) => validate_query_embedding(embedding).map(Some),
-        Err(err) => {
-            eprintln!("[Search] embedding disabled for this request: {err}");
-            Ok(None)
-        }
-    }
+    Ok(None)
 }
 
 fn validate_query_embedding(embedding: Vec<f32>) -> Result<Vec<f32>, String> {
@@ -1111,7 +1109,7 @@ pub(crate) async fn fetch_embedding_batch(
     }
 
     let endpoint = volcengine_embedding_endpoint(cfg);
-    let mut req = crate::proxy::configure_http_client(reqwest::Client::builder())
+    let mut req = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(
             SEARCH_EMBEDDING_TIMEOUT_SECS,
         ))
@@ -1244,7 +1242,7 @@ async fn fetch_embedding_once(
     } else {
         volcengine_embedding_endpoint(cfg)
     };
-    let mut req = crate::proxy::configure_http_client(reqwest::Client::builder())
+    let mut req = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(
             SEARCH_EMBEDDING_TIMEOUT_SECS,
         ))
@@ -1731,6 +1729,38 @@ mod tests {
         assert!(validate_query_embedding(vec![]).is_err());
         assert!(validate_query_embedding(vec![f32::NAN]).is_err());
         assert!(validate_query_embedding(vec![f32::INFINITY]).is_err());
+    }
+
+    #[tokio::test]
+    async fn local_profile_rejects_enabled_remote_embedding_config() {
+        let config = SearchEmbeddingConfig {
+            enabled: true,
+            endpoint: "http://127.0.0.1:9/v1/embeddings".to_string(),
+            api_key: String::new(),
+            model: "should-never-be-contacted".to_string(),
+            output_dimensionality: None,
+            extra_headers: None,
+            max_chunk_chars: None,
+            overlap_chunk_chars: None,
+        };
+        let error = resolve_query_embedding("private query", None, Some(config))
+            .await
+            .unwrap_err();
+        assert!(error.contains("disabled by the sec-training-local-v1 profile"));
+    }
+
+    #[tokio::test]
+    async fn local_profile_keeps_lexical_and_explicit_vector_search_available() {
+        assert_eq!(
+            resolve_query_embedding("query", None, None).await.unwrap(),
+            None
+        );
+        assert_eq!(
+            resolve_query_embedding("query", Some(vec![0.25, 0.75]), None)
+                .await
+                .unwrap(),
+            Some(vec![0.25, 0.75])
+        );
     }
 
     #[test]

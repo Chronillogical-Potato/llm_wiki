@@ -10,10 +10,7 @@
   },
   "bundle": {
     "resources": {
-      "pdfium/pdfium.dll": "pdfium/pdfium.dll",
-      "../mcp-server/package.json": "mcp-server/package.json",
-      "../mcp-server/dist": "mcp-server/dist",
-      "../mcp-server/node_modules": "mcp-server/node_modules"
+      "pdfium/pdfium.dll": "pdfium/pdfium.dll"
     }
   }
 }

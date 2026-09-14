@@ -4,8 +4,9 @@ mod clip_server;
 mod commands;
 mod cors;
 mod panic_guard;
-mod proxy;
+mod runtime_auth;
 mod server_bind;
+mod study;
 mod tray;
 mod types;
 
@@ -497,22 +498,6 @@ fn hex_val(b: u8) -> Option<u8> {
     }
 }
 
-/// Apply a proxy configuration to the process env immediately, so the
-/// next outbound HTTP request picks it up without needing the user to
-/// restart the app. tauri-plugin-http builds a fresh
-/// `reqwest::ClientBuilder` per fetch and reqwest's `auto_sys_proxy`
-/// re-reads HTTP_PROXY / HTTPS_PROXY / NO_PROXY each time, so updating
-/// these env vars is sufficient to flip the proxy on/off live.
-///
-/// Returns the same human-readable summary `apply_proxy_env` produces
-/// for logging.
-#[tauri::command]
-fn set_proxy_env(config: proxy::ProxyConfig) -> String {
-    let summary = proxy::apply_proxy_env(&config);
-    eprintln!("[proxy] live update: {summary}");
-    summary
-}
-
 #[tauri::command]
 fn set_close_behavior(
     value: String,
@@ -560,36 +545,13 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None::<Vec<&str>>,
         ))
-        // Rust-backed fetch so third-party LLM APIs that reject
-        // browser-origin headers via CORS preflight (MiniMax, Volcengine
-        // Ark's api/coding/v3, etc.) still work. Requests leave the app
-        // from Rust, never the webview.
-        .plugin(tauri_plugin_http::init())
         .setup(|app| {
             // Let the PDF extractor find the bundled pdfium dynamic
             // library via Tauri's platform-correct resource path.
             if let Ok(dir) = app.path().resource_dir() {
                 commands::fs::set_resource_dir_hint(dir);
             }
-            // Apply user-configured global HTTP proxy by setting
-            // HTTP_PROXY / HTTPS_PROXY / NO_PROXY env vars BEFORE
-            // any HTTP request is made. tauri-plugin-http's reqwest
-            // client reads these on first construction. Lives next
-            // to the resource-dir hint so the proxy applies to
-            // everything: LLM, embedding, update check, deep
-            // research, captioning. See src-tauri/src/proxy.rs.
-            if let Ok(dir) = app.path().app_data_dir() {
-                let store_path = dir.join("app-state.json");
-                eprintln!("[proxy] reading from {}", store_path.display());
-                if let Some(cfg) = proxy::read_proxy_config_from_store(&store_path) {
-                    let summary = proxy::apply_proxy_env(&cfg);
-                    eprintln!("[proxy] {summary}");
-                } else {
-                    eprintln!("[proxy] no proxyConfig in store, requests go direct");
-                }
-            } else {
-                eprintln!("[proxy] could not resolve app_data_dir");
-            }
+            runtime_auth::initialize().map_err(std::io::Error::other)?;
             // Registry of running `claude` subprocesses, keyed by the
             // frontend-generated stream id. Populated by claude_cli_spawn,
             // drained on process exit or by claude_cli_kill.
@@ -602,7 +564,6 @@ pub fn run() {
             app.manage(TrayAvailabilityState(Mutex::new(false)));
             // Start the API before optional desktop integrations so the
             // backend is reachable if tray setup or another integration fails.
-            clip_server::start_clip_server(app.handle().clone());
             api_server::start_api_server(app.handle().clone());
             let tray_available = match tray::create_tray(app.handle()) {
                 Ok(()) => true,
@@ -654,21 +615,14 @@ pub fn run() {
             commands::project_maintenance::import_project_archive,
             commands::project_maintenance::rebuild_wiki_index,
             commands::search::search_project,
-            commands::search::embedding_fetch,
-            commands::search::embedding_fetch_batch,
             commands::search::get_page_links,
-            commands::external_search::web_search,
-            commands::external_search::anytxt_search,
             clip_server_status,
             api_server_status,
             api_server_reload_config,
-            agent_start_turn,
-            agent_start_turn_stream,
             agent_cancel_turn,
             agent_get_session,
             agent_list_sessions,
             agent::skills::agent_list_skills,
-            mcp_server_entry_path,
             commands::vectorstore::vector_upsert,
             commands::vectorstore::vector_search,
             commands::vectorstore::vector_delete,
@@ -681,9 +635,6 @@ pub fn run() {
             commands::vectorstore::vector_optimize_chunks,
             commands::vectorstore::vector_legacy_row_count,
             commands::vectorstore::vector_drop_legacy,
-            commands::claude_cli::claude_cli_detect,
-            commands::claude_cli::claude_cli_spawn,
-            commands::claude_cli::claude_cli_kill,
             commands::codex_cli::codex_cli_detect,
             commands::codex_cli::codex_cli_spawn,
             commands::codex_cli::codex_cli_kill,
@@ -697,7 +648,6 @@ pub fn run() {
             commands::file_sync::get_file_change_queue,
             commands::file_sync::retry_file_change_task,
             commands::file_sync::ignore_file_change_task,
-            set_proxy_env,
             set_close_behavior,
         ])
         .on_window_event(|window, event| {
@@ -750,6 +700,9 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                runtime_auth::cleanup();
+            }
             #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Reopen {
                 has_visible_windows,
