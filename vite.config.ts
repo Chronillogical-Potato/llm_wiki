@@ -4,18 +4,18 @@ import { defineConfig } from "vite"
 import react from "@vitejs/plugin-react"
 import tailwindcss from "@tailwindcss/vite"
 
-const host = process.env.TAURI_DEV_HOST
+const host = process.env.TAURI_DEV_HOST || "127.0.0.1"
 
 // Read version from package.json at config-load time so the Settings
 // UI can show the running app version without duplicating the string.
-const pkgJson = JSON.parse(readFileSync(path.resolve(__dirname, "package.json"), "utf-8"))
+const pkgJson = JSON.parse(readFileSync(path.resolve(import.meta.dirname, "package.json"), "utf-8"))
 
 // https://vitejs.dev/config/
 export default defineConfig(async () => ({
   plugins: [react(), tailwindcss()],
 
   resolve: {
-    alias: { "@": path.resolve(__dirname, "./src") },
+    alias: { "@": path.resolve(import.meta.dirname, "./src") },
   },
 
   define: {
@@ -30,7 +30,7 @@ export default defineConfig(async () => ({
   server: {
     port: 1420,
     strictPort: true,
-    host: host || false,
+    host,
     hmr: host
       ? {
           protocol: "ws",
