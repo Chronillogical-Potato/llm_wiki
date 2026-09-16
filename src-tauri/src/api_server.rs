@@ -2677,6 +2677,10 @@ fn build_graph_from_files(
         let links = commands::search::extract_graph_links(&content);
         raw.insert(id, (title, node_type, relative_path, links));
     }
+    // Query pages are intermediate artifacts rather than graph nodes. Remove
+    // them before link resolution so the API cannot emit edges whose source
+    // or target is absent from the returned node set.
+    raw.retain(|_, (_, node_type, _, _)| node_type != "query");
     let aliases = graph_aliases(&raw);
     let mut link_count: BTreeMap<String, usize> = raw.keys().map(|id| (id.clone(), 0)).collect();
     let mut seen = BTreeSet::new();
@@ -2707,7 +2711,6 @@ fn build_graph_from_files(
     }
     let nodes = raw
         .into_iter()
-        .filter(|(_, (_, node_type, _, _))| node_type != "query")
         .map(|(id, (label, node_type, path, _))| ApiGraphNode {
             link_count: *link_count.get(&id).unwrap_or(&0),
             id,
@@ -2976,6 +2979,26 @@ mod tests {
         assert!(edges
             .iter()
             .any(|edge| edge.source == "source" && edge.target == "target"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn graph_drops_edges_to_hidden_query_pages() {
+        let root = test_project_dir();
+        fs::write(
+            root.join("wiki/source.md"),
+            "---\nrelated: [hidden]\n---\n# Source",
+        )
+        .unwrap();
+        fs::write(
+            root.join("wiki/hidden.md"),
+            "---\ntype: query\n---\n# Hidden\n[[source]]",
+        )
+        .unwrap();
+
+        let (nodes, edges) = build_graph(root.to_string_lossy().as_ref()).unwrap();
+        assert!(nodes.iter().all(|node| node.id != "hidden"));
+        assert!(edges.is_empty());
         let _ = fs::remove_dir_all(root);
     }
 

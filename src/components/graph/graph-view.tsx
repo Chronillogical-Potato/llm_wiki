@@ -1469,7 +1469,14 @@ export function GraphView() {
                       </span>
                       <span className="text-muted-foreground/60 ml-auto shrink-0">{c.nodeCount}</span>
                       {c.meanIntraDegree < 2 && c.nodeCount >= 3 && (
-                        <span className="text-amber-500 shrink-0" title={`Low internal connectivity: ${c.meanIntraDegree.toFixed(1)} links per page`}>!</span>
+                        <span
+                          className="text-amber-500 shrink-0"
+                          title={t("graph.lowInternalConnectivity", {
+                            count: c.meanIntraDegree.toFixed(1),
+                          })}
+                        >
+                          !
+                        </span>
                       )}
                     </div>
                   ))}

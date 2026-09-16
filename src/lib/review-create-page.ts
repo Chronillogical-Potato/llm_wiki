@@ -97,14 +97,26 @@ export function createReviewPageDrafts(item: ReviewItem, action: string): Review
   }))
 }
 
-export function reviewPageFileName(
+export async function availableReviewPageFileName(
   title: string,
-  baseNameExists: boolean,
+  fileExists: (fileName: string) => Promise<boolean>,
   now: Date = new Date(),
-): { fileName: string; date: string } {
+): Promise<{ fileName: string; date: string }> {
   const timestamped = makeQueryFileName(title, now)
-  return {
-    fileName: baseNameExists ? timestamped.fileName : `${makeQuerySlug(title)}.md`,
-    date: timestamped.date,
+  const stableName = `${makeQuerySlug(title)}.md`
+  if (!(await fileExists(stableName))) {
+    return { fileName: stableName, date: timestamped.date }
   }
+  if (!(await fileExists(timestamped.fileName))) {
+    return { fileName: timestamped.fileName, date: timestamped.date }
+  }
+
+  const stem = timestamped.fileName.replace(/\.md$/, "")
+  for (let suffix = 2; suffix <= 10_000; suffix += 1) {
+    const candidate = `${stem}-${suffix}.md`
+    if (!(await fileExists(candidate))) {
+      return { fileName: candidate, date: timestamped.date }
+    }
+  }
+  throw new Error("Could not allocate a unique wiki page filename")
 }

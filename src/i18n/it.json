@@ -1141,6 +1141,7 @@
     "communitiesLabel": "Comunità",
     "showAll": "Mostra tutto",
     "cluster": "Cluster {{id}}",
+    "lowInternalConnectivity": "Connettività interna bassa: {{count}} link per pagina",
     "surprisingConnections": "Connessioni inaspettate",
     "knowledgeGaps": "Lacune di conoscenza",
     "deepResearch": "Deep Research",

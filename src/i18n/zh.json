@@ -1141,6 +1141,7 @@
     "communitiesLabel": "社区",
     "showAll": "显示全部",
     "cluster": "簇 {{id}}",
+    "lowInternalConnectivity": "内部连接较少：平均每页 {{count}} 条链接",
     "surprisingConnections": "意外连接",
     "knowledgeGaps": "知识缺口",
     "deepResearch": "深度研究",

@@ -19,8 +19,8 @@ import { writeFile, readFile, deleteFile, fileExists } from "@/commands/fs"
 import { normalizePath } from "@/lib/path-utils"
 import { refreshProjectFileTree } from "@/lib/project-file-tree-refresh"
 import { hasConfiguredDeepResearchSources } from "@/lib/web-search"
-import { makeQueryFileName, makeQuerySlug } from "@/lib/wiki-filename"
-import { createReviewPageDrafts, reviewPageFileName } from "@/lib/review-create-page"
+import { makeQueryFileName } from "@/lib/wiki-filename"
+import { availableReviewPageFileName, createReviewPageDrafts } from "@/lib/review-create-page"
 import { cleanAssistantContentForWikiSave, titleFromCleanAssistantContent } from "@/lib/chat-save-to-wiki"
 import { useTranslation } from "react-i18next"
 import { useAppDialog } from "@/stores/app-dialog-store"
@@ -241,11 +241,9 @@ export function ReviewView() {
           }> = []
 
           for (const draft of drafts) {
-            const baseFileName = `${makeQuerySlug(draft.title)}.md`
-            const baseFilePath = `${pp}/wiki/${draft.dir}/${baseFileName}`
-            const { date, fileName } = reviewPageFileName(
+            const { date, fileName } = await availableReviewPageFileName(
               draft.title,
-              await fileExists(baseFilePath),
+              (candidate) => fileExists(`${pp}/wiki/${draft.dir}/${candidate}`),
             )
             const filePath = `${pp}/wiki/${draft.dir}/${fileName}`
             const frontmatter = `---\ntype: ${draft.pageType}\ntitle: "${draft.title.replace(/"/g, '\\"')}"\ncreated: ${date}\ntags: []\nrelated: []\n---\n\n`

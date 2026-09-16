@@ -1141,6 +1141,7 @@
     "communitiesLabel": "Сообщества",
     "showAll": "Показать все",
     "cluster": "Кластер {{id}}",
+    "lowInternalConnectivity": "Слабая внутренняя связность: {{count}} ссылок на страницу",
     "surprisingConnections": "Неожиданные связи",
     "knowledgeGaps": "Пробелы в знаниях",
     "deepResearch": "Глубокое исследование",
