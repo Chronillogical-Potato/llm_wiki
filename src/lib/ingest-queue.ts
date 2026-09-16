@@ -1040,6 +1040,17 @@ async function runTask(
     }
 
     const message = err instanceof Error ? err.message : String(err)
+    if (
+      err instanceof Error
+      && "nonRetryable" in err
+      && (err as Error & { nonRetryable?: unknown }).nonRetryable === true
+    ) {
+      task.status = "failed"
+      task.error = message
+      await saveQueue(projectPath)
+      console.log(`[Ingest Queue] Failed without retry: ${task.sourcePath} — ${message}`)
+      return
+    }
     if (isUsageLimitError(message)) {
       task.status = "pending"
       task.error = `Paused after provider usage limit: ${message}`

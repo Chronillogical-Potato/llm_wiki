@@ -10,7 +10,7 @@ import {
   listDirectory,
 } from "@/commands/fs"
 import { streamChat } from "@/lib/llm-client"
-import type { LlmConfig } from "@/stores/wiki-store"
+import type { LlmConfig, ReasoningConfig } from "@/stores/wiki-store"
 import { useWikiStore } from "@/stores/wiki-store"
 import { parseWithMineruResult } from "@/lib/mineru"
 import { useChatStore } from "@/stores/chat-store"
@@ -54,9 +54,21 @@ const INGEST_GENERATION_TOKENS_DEFAULT = 8_192
 const INGEST_GENERATION_TOKENS_128K = 16_384
 const INGEST_GENERATION_TOKENS_256K = 24_576
 const INGEST_GENERATION_TOKENS_512K = 32_768
+const INGEST_ANALYSIS_TOKENS_MIN = 4_096
+const INGEST_ANALYSIS_TOKENS_MAX = 8_192
+const CONSERVATIVE_CHARS_PER_OUTPUT_TOKEN = 4
 const REVIEW_STAGE_MIN_SIGNAL_CHARS = 10_000
 const REVIEW_STAGE_MIN_FILE_BLOCKS = 4
 const AGGREGATE_WIKI_PATHS = ["wiki/index.md", "wiki/overview.md", "wiki/log.md"] as const
+
+export class NonRetryableIngestError extends Error {
+  readonly nonRetryable = true
+
+  constructor(message: string) {
+    super(message)
+    this.name = "NonRetryableIngestError"
+  }
+}
 
 function appendSavedImageRefsForCaption(content: string, images: SavedImage[]): string {
   if (images.length === 0) return content
@@ -66,6 +78,33 @@ function appendSavedImageRefsForCaption(content: string, images: SavedImage[]): 
     .map((relPath) => `![](${relPath})`)
   if (refs.length === 0) return content
   return `${content}\n\n## Referenced Local Images\n\n${refs.join("\n")}\n`
+}
+
+function ingestAnalysisRequest(config: LlmConfig): {
+  maxTokens: number
+  reasoning: ReasoningConfig
+} {
+  const contentTokens = computeIngestAnalysisMaxTokens(config.maxContextSize)
+  const requested = resolveIngestReasoning(config)
+  const reasoning = requested.mode === "custom"
+    ? {
+        ...requested,
+        budgetTokens: Math.max(
+          1_024,
+          Math.min(requested.budgetTokens ?? 0, INGEST_ANALYSIS_TOKENS_MAX),
+        ),
+      }
+    : requested
+  const reasoningTokens = reasoning.mode === "low"
+    ? 1_024
+    : reasoning.mode === "medium"
+      ? 4_096
+      : reasoning.mode === "high" || reasoning.mode === "max"
+        ? 8_192
+        : reasoning.mode === "custom"
+          ? reasoning.budgetTokens ?? 0
+          : 0
+  return { maxTokens: contentTokens + reasoningTokens, reasoning }
 }
 
 const ingestImageExtractionPromises = new Map<string, Promise<SavedImage[]>>()
@@ -1033,6 +1072,8 @@ async function autoIngestImpl(
   let analysis = precomputedAnalysis
 
   if (!analysis) {
+    let analysisTruncated = false
+    const analysisRequest = ingestAnalysisRequest(llmConfig)
     await streamChat(
       llmConfig,
       [
@@ -1041,14 +1082,21 @@ async function autoIngestImpl(
       ],
       {
         onToken: (token) => { analysis += token },
-        onDone: () => {},
+        onDone: (completion) => { analysisTruncated = completion?.truncated === true },
         onError: (err) => {
           activity.updateItem(activityId, { status: "error", detail: `Analysis failed: ${err.message}` })
         },
       },
       signal,
-      { temperature: 0.1, reasoning: resolveIngestReasoning(llmConfig), max_tokens: 4096 },
+      { temperature: 0.1, reasoning: analysisRequest.reasoning, max_tokens: analysisRequest.maxTokens },
     )
+    if (analysisTruncated) {
+      const message =
+        `Analysis was truncated after reaching the ${analysisRequest.maxTokens.toLocaleString()} token output limit. ` +
+        "Wiki pages were not generated from the incomplete analysis. Split the source or use a model with a larger output limit."
+      activity.updateItem(activityId, { status: "error", detail: message })
+      throw new NonRetryableIngestError(message)
+    }
   }
 
   // A silent `return []` here would look like success to the queue
@@ -2584,6 +2632,18 @@ export function computeIngestGenerationMaxTokens(maxContextSize: number | undefi
   return INGEST_GENERATION_TOKENS_DEFAULT
 }
 
+export function computeIngestAnalysisMaxTokens(maxContextSize: number | undefined): number {
+  const { responseReserve } = computeContextBudget(maxContextSize)
+  const reservedOutputTokens = Math.floor(
+    responseReserve / CONSERVATIVE_CHARS_PER_OUTPUT_TOKEN,
+  )
+  return clampNumber(
+    reservedOutputTokens,
+    INGEST_ANALYSIS_TOKENS_MIN,
+    INGEST_ANALYSIS_TOKENS_MAX,
+  )
+}
+
 export function computeIngestReviewMaxTokens(maxContextSize: number | undefined): number {
   return Math.min(8_192, Math.max(4_096, Math.floor(computeIngestGenerationMaxTokens(maxContextSize) / 2)))
 }
@@ -2914,6 +2974,7 @@ async function analyzeLongSourceInChunks(
     })
   }
 
+  const analysisRequest = ingestAnalysisRequest(llmConfig)
   for (const chunk of chunks) {
     if (chunk.index <= completedThrough) continue
     throwIfIngestAborted(signal, activityId)
@@ -2923,6 +2984,7 @@ async function analyzeLongSourceInChunks(
 
     let raw = ""
     let hadError = false
+    let analysisTruncated = false
     await streamChat(
       llmConfig,
       [
@@ -2939,18 +3001,25 @@ async function analyzeLongSourceInChunks(
       ],
       {
         onToken: (token) => { raw += token },
-        onDone: () => {},
+        onDone: (completion) => { analysisTruncated = completion?.truncated === true },
         onError: (err) => {
           hadError = true
           activity.updateItem(activityId, { status: "error", detail: `Chunk analysis failed: ${err.message}` })
         },
       },
       signal,
-      { temperature: 0.1, reasoning: resolveIngestReasoning(llmConfig), max_tokens: 4096 },
+      { temperature: 0.1, reasoning: analysisRequest.reasoning, max_tokens: analysisRequest.maxTokens },
     )
 
     throwIfIngestAborted(signal, activityId)
     if (hadError) throw new Error("Chunk analysis stream failed")
+    if (analysisTruncated) {
+      const message =
+        `Chunk ${chunk.index}/${chunk.total} analysis was truncated after reaching the ` +
+        `${analysisRequest.maxTokens.toLocaleString()} token output limit; the saved checkpoint will be retried`
+      activity.updateItem(activityId, { status: "error", detail: message })
+      throw new Error(message)
+    }
 
     const chunkAnalysis = extractMarkedSection(raw, "Chunk Analysis") || raw.trim()
     const nextDigest = extractMarkedSection(raw, "Updated Global Digest")

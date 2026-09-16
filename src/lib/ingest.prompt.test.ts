@@ -4,6 +4,7 @@ import {
   buildGenerationPrompt,
   buildPageMergeSystemPrompt,
   computeIngestGenerationMaxTokens,
+  computeIngestAnalysisMaxTokens,
   computeIngestReviewMaxTokens,
   computeIngestSourceBudget,
   formatIngestWarningLogEntry,
@@ -203,6 +204,10 @@ describe("long-source ingest planning", () => {
     expect(computeIngestGenerationMaxTokens(128_000)).toBe(16_384)
     expect(computeIngestGenerationMaxTokens(256_000)).toBe(24_576)
     expect(computeIngestGenerationMaxTokens(1_000_000)).toBe(32_768)
+    expect(computeIngestAnalysisMaxTokens(64_000)).toBe(4_096)
+    expect(computeIngestAnalysisMaxTokens(128_000)).toBe(4_800)
+    expect(computeIngestAnalysisMaxTokens(256_000)).toBe(8_192)
+    expect(computeIngestAnalysisMaxTokens(1_000_000)).toBe(8_192)
     expect(computeIngestReviewMaxTokens(1_000_000)).toBe(8_192)
   })
 
