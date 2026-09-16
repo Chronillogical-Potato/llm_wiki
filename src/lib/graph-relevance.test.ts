@@ -55,4 +55,20 @@ describe("buildRetrievalGraph", () => {
     expect(b.nodes.values().next().value?.title).toBe("B")
     expect(readFile).toHaveBeenCalledTimes(2)
   })
+
+  it("includes frontmatter related entries in retrieval links", async () => {
+    listDirectory.mockResolvedValue([
+      ...files("/project", 2),
+    ])
+    readFile.mockImplementation(async (path: string) =>
+      path.endsWith("page-0.md")
+        ? "---\nrelated: [page-1]\n---\n# Source"
+        : "# Target",
+    )
+
+    const graph = await buildRetrievalGraph("/project", 2)
+
+    expect(graph.nodes.get("page-0")?.outLinks).toContain("page-1")
+    expect(graph.nodes.get("page-1")?.inLinks).toContain("page-0")
+  })
 })

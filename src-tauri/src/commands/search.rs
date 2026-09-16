@@ -204,7 +204,7 @@ fn get_page_links_inner(project_path: &str, file_path: &str) -> Result<PageLinks
             GraphPage {
                 path,
                 title,
-                links: extract_wikilinks(&content),
+                links: extract_graph_links(&content),
                 content,
             },
         );
@@ -401,7 +401,7 @@ pub async fn search_project_inner(
                 GraphPage {
                     path: relative_path,
                     title,
-                    links: extract_wikilinks(&content),
+                    links: extract_graph_links(&content),
                     content,
                 },
             );
@@ -670,7 +670,7 @@ fn normalize_graph_alias(value: &str) -> String {
         .to_lowercase()
 }
 
-fn extract_wikilinks(content: &str) -> Vec<String> {
+pub(crate) fn extract_graph_links(content: &str) -> Vec<String> {
     let mut links = Vec::new();
     let mut rest = content;
     while let Some(start) = rest.find("[[") {
@@ -684,7 +684,65 @@ fn extract_wikilinks(content: &str) -> Vec<String> {
         }
         rest = &rest[end + 2..];
     }
+    for related in extract_related_frontmatter(content) {
+        if !links.contains(&related) {
+            links.push(related);
+        }
+    }
     links
+}
+
+fn extract_related_frontmatter(content: &str) -> Vec<String> {
+    let normalized = content.replace("\r\n", "\n");
+    let Some(rest) = normalized.strip_prefix("---\n") else {
+        return Vec::new();
+    };
+    let Some(end) = rest.find("\n---") else {
+        return Vec::new();
+    };
+    let lines: Vec<&str> = rest[..end].lines().collect();
+    let mut out = Vec::new();
+    let mut index = 0;
+    while index < lines.len() {
+        let line = lines[index];
+        let Some(value) = line.trim().strip_prefix("related:") else {
+            index += 1;
+            continue;
+        };
+        let value = value.trim();
+        if value.starts_with('[') && value.ends_with(']') {
+            for item in value[1..value.len() - 1].split(',') {
+                if let Some(item) = normalize_related_value(item) {
+                    out.push(item);
+                }
+            }
+        } else if value.is_empty() {
+            index += 1;
+            while index < lines.len() {
+                let trimmed = lines[index].trim();
+                let Some(item) = trimmed.strip_prefix('-') else {
+                    break;
+                };
+                if let Some(item) = normalize_related_value(item) {
+                    out.push(item);
+                }
+                index += 1;
+            }
+            continue;
+        }
+        index += 1;
+    }
+    out
+}
+
+fn normalize_related_value(value: &str) -> Option<String> {
+    let value = value.trim().trim_matches('"').trim_matches('\'').trim();
+    let value = value
+        .strip_prefix("[[")
+        .and_then(|value| value.strip_suffix("]]"))
+        .unwrap_or(value)
+        .trim();
+    (!value.is_empty()).then(|| value.to_string())
 }
 
 fn search_mode(token_rank_empty: bool, vector_hits: usize, graph_hits: usize) -> &'static str {
@@ -1703,6 +1761,17 @@ mod tests {
         let refs = extract_image_refs("![a](wiki/media/x.png)\n![b](wiki/media/x.png)");
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].alt, "a");
+    }
+
+    #[test]
+    fn graph_links_include_frontmatter_related_and_dedupe_body_links() {
+        let links = extract_graph_links("---\nrelated: [foo, \"[[bar]]\"]\n---\n# Page\n[[foo]]");
+        assert_eq!(links, vec!["bar", "foo"]);
+
+        let block_links = extract_graph_links(
+            "---\r\nrelated:\r\n  - wiki/entities/alpha.md\r\n  - beta\r\n---\r\n# Page",
+        );
+        assert_eq!(block_links, vec!["wiki/entities/alpha.md", "beta"]);
     }
 
     #[test]

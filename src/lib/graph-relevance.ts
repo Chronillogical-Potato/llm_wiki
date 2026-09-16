@@ -1,6 +1,7 @@
 import { readFile, listDirectory } from "@/commands/fs"
 import type { FileNode } from "@/types/wiki"
 import { normalizePath } from "@/lib/path-utils"
+import { parseFrontmatter } from "@/lib/frontmatter"
 
 // ---------------------------------------------------------------------------
 // Types
@@ -87,7 +88,7 @@ function fileNameToId(fileName: string): string {
   return fileName.replace(/\.md$/, "")
 }
 
-function extractFrontmatter(content: string): { title: string; type: string; sources: string[] } {
+function extractFrontmatter(content: string): { title: string; type: string; sources: string[]; related: string[] } {
   const fmMatch = content.match(/^---\n([\s\S]*?)\n---/)
   const fm = fmMatch ? fmMatch[1] : ""
 
@@ -96,6 +97,7 @@ function extractFrontmatter(content: string): { title: string; type: string; sou
 
   // Parse sources array from YAML frontmatter
   const sources: string[] = []
+  const related: string[] = []
   const sourcesBlockMatch = fm.match(/^sources:\s*\n((?:\s+-\s+.+\n?)*)/m)
   if (sourcesBlockMatch) {
     const lines = sourcesBlockMatch[1].split("\n")
@@ -117,6 +119,23 @@ function extractFrontmatter(content: string): { title: string; type: string; sou
     }
   }
 
+  const parsedRelated = parseFrontmatter(content).frontmatter?.related
+  if (Array.isArray(parsedRelated)) {
+    for (const item of parsedRelated) {
+      if (typeof item !== "string") continue
+      const normalized = item
+        .trim()
+        .replace(/^\[\[|\]\]$/g, "")
+        .split("|")[0]
+        .split("#")[0]
+        .replace(/\\/g, "/")
+        .split("/")
+        .pop()
+        ?.replace(/\.md$/i, "") ?? ""
+      if (normalized) related.push(normalized)
+    }
+  }
+
   let title = titleMatch ? titleMatch[1].trim() : ""
   if (!title) {
     const headingMatch = content.match(/^#\s+(.+)$/m)
@@ -127,6 +146,7 @@ function extractFrontmatter(content: string): { title: string; type: string; sou
     title,
     type: typeMatch ? typeMatch[1].trim().toLowerCase() : "other",
     sources,
+    related,
   }
 }
 
@@ -218,7 +238,7 @@ export async function buildRetrievalGraph(
           type: fm.type,
           path: file.path,
           sources: fm.sources,
-          rawLinks: extractWikilinks(content),
+          rawLinks: Array.from(new Set([...extractWikilinks(content), ...fm.related])),
           fileName: file.name,
         }
       } catch {

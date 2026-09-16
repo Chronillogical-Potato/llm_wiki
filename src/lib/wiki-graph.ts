@@ -111,6 +111,17 @@ function extractWikilinks(content: string): string[] {
   return links
 }
 
+function extractRelated(content: string): string[] {
+  const related = parseFrontmatter(content).frontmatter?.related
+  if (!Array.isArray(related)) return []
+  return related
+    .filter((value): value is string => typeof value === "string")
+    .map((value) => value.trim().replace(/^\[\[|\]\]$/g, ""))
+    .map((value) => value.split("|")[0].split("#")[0].replace(/\\/g, "/"))
+    .map((value) => value.split("/").pop()?.replace(/\.md$/i, "") ?? "")
+    .filter(Boolean)
+}
+
 function fileNameToId(fileName: string): string {
   return fileName.replace(/\.md$/, "")
 }
@@ -225,7 +236,7 @@ async function buildWikiGraphUncached(projectPath: string): Promise<WikiGraphRes
           label: extractTitle(content, file.name),
           type: extractType(content),
           path: file.path,
-          links: extractWikilinks(content),
+          links: Array.from(new Set([...extractWikilinks(content), ...extractRelated(content)])),
         }
       } catch {
         return null

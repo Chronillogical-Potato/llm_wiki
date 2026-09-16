@@ -2674,7 +2674,7 @@ fn build_graph_from_files(
         let title = commands::search::extract_title(&content, fallback_name);
         let node_type = extract_type(&content);
         let relative_path = relative_to_project(project_path, path);
-        let links = extract_wikilinks(&content);
+        let links = commands::search::extract_graph_links(&content);
         raw.insert(id, (title, node_type, relative_path, links));
     }
     let aliases = graph_aliases(&raw);
@@ -2815,24 +2815,6 @@ fn extract_type(content: &str) -> String {
         }
     }
     "other".to_string()
-}
-
-fn extract_wikilinks(content: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut rest = content;
-    while let Some(start) = rest.find("[[") {
-        rest = &rest[start + 2..];
-        let Some(end) = rest.find("]]") else {
-            break;
-        };
-        let inner = &rest[..end];
-        let target = inner.split('|').next().unwrap_or("").trim();
-        if !target.is_empty() {
-            out.push(target.to_string());
-        }
-        rest = &rest[end + 2..];
-    }
-    out
 }
 
 fn resolve_link(raw: &str, aliases: &GraphAliases) -> Option<String> {
@@ -2977,6 +2959,23 @@ mod tests {
         assert!(edges
             .iter()
             .any(|edge| { edge.source == "index" && edge.target == "Detail Page" }));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn graph_includes_frontmatter_related_links() {
+        let root = test_project_dir();
+        fs::write(
+            root.join("wiki/source.md"),
+            "---\nrelated: [target]\n---\n# Source",
+        )
+        .unwrap();
+        fs::write(root.join("wiki/target.md"), "# Target").unwrap();
+
+        let (_, edges) = build_graph(root.to_string_lossy().as_ref()).unwrap();
+        assert!(edges
+            .iter()
+            .any(|edge| edge.source == "source" && edge.target == "target"));
         let _ = fs::remove_dir_all(root);
     }
 

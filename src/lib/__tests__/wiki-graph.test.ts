@@ -100,6 +100,25 @@ describe("buildWikiGraph frontmatter extraction", () => {
     ])
   })
 
+  it("includes frontmatter related entries as graph edges", async () => {
+    const buildWikiGraph = await loadBuildWikiGraph()
+    mockListDirectory.mockResolvedValue([
+      mdFile("source.md"),
+      mdFile("target.md"),
+    ])
+    mockReadFile.mockImplementation(async (path: string) =>
+      path.endsWith("source.md")
+        ? "---\nrelated: [wiki/concepts/target.md]\n---\n# Source"
+        : "# Target",
+    )
+
+    const graph = await buildWikiGraph("/related-project")
+
+    expect(graph.edges).toEqual([
+      expect.objectContaining({ source: "source", target: "target" }),
+    ])
+  })
+
   it("prefers an exact page id when case-folded aliases collide", async () => {
     const buildWikiGraph = await loadBuildWikiGraph()
     mockListDirectory.mockResolvedValue([
