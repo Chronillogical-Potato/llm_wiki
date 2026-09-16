@@ -1,4 +1,5 @@
 import type { ReviewItem } from "@/stores/review-store"
+import { makeQueryFileName, makeQuerySlug } from "@/lib/wiki-filename"
 
 export type ReviewPageType = "entity" | "concept" | "comparison" | "synthesis" | "query"
 
@@ -94,4 +95,16 @@ export function createReviewPageDrafts(item: ReviewItem, action: string): Review
     pageType,
     dir: dirForPageType(pageType),
   }))
+}
+
+export function reviewPageFileName(
+  title: string,
+  baseNameExists: boolean,
+  now: Date = new Date(),
+): { fileName: string; date: string } {
+  const timestamped = makeQueryFileName(title, now)
+  return {
+    fileName: baseNameExists ? timestamped.fileName : `${makeQuerySlug(title)}.md`,
+    date: timestamped.date,
+  }
 }

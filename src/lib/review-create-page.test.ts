@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 import type { ReviewItem } from "@/stores/review-store"
-import { createReviewPageDrafts } from "./review-create-page"
+import { createReviewPageDrafts, reviewPageFileName } from "./review-create-page"
 
 function review(overrides: Partial<ReviewItem>): ReviewItem {
   return {
@@ -48,3 +48,18 @@ describe("createReviewPageDrafts", () => {
   })
 })
 
+describe("reviewPageFileName", () => {
+  const now = new Date("2026-09-16T12:34:56.000Z")
+
+  it("uses a stable slug when the destination is free", () => {
+    expect(reviewPageFileName("Clash Detection", false, now)).toEqual({
+      fileName: "clash-detection.md",
+      date: "2026-09-16",
+    })
+  })
+
+  it("adds a timestamp only when the stable slug already exists", () => {
+    expect(reviewPageFileName("Clash Detection", true, now).fileName)
+      .toBe("clash-detection-2026-09-16-123456.md")
+  })
+})

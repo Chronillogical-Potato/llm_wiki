@@ -15,12 +15,12 @@ import {
 import { Button } from "@/components/ui/button"
 import { useReviewStore, type ReviewItem } from "@/stores/review-store"
 import { useWikiStore } from "@/stores/wiki-store"
-import { writeFile, readFile, deleteFile } from "@/commands/fs"
+import { writeFile, readFile, deleteFile, fileExists } from "@/commands/fs"
 import { normalizePath } from "@/lib/path-utils"
 import { refreshProjectFileTree } from "@/lib/project-file-tree-refresh"
 import { hasConfiguredDeepResearchSources } from "@/lib/web-search"
-import { makeQueryFileName } from "@/lib/wiki-filename"
-import { createReviewPageDrafts } from "@/lib/review-create-page"
+import { makeQueryFileName, makeQuerySlug } from "@/lib/wiki-filename"
+import { createReviewPageDrafts, reviewPageFileName } from "@/lib/review-create-page"
 import { cleanAssistantContentForWikiSave, titleFromCleanAssistantContent } from "@/lib/chat-save-to-wiki"
 import { useTranslation } from "react-i18next"
 import { useAppDialog } from "@/stores/app-dialog-store"
@@ -241,7 +241,12 @@ export function ReviewView() {
           }> = []
 
           for (const draft of drafts) {
-            const { date, fileName } = makeQueryFileName(draft.title)
+            const baseFileName = `${makeQuerySlug(draft.title)}.md`
+            const baseFilePath = `${pp}/wiki/${draft.dir}/${baseFileName}`
+            const { date, fileName } = reviewPageFileName(
+              draft.title,
+              await fileExists(baseFilePath),
+            )
             const filePath = `${pp}/wiki/${draft.dir}/${fileName}`
             const frontmatter = `---\ntype: ${draft.pageType}\ntitle: "${draft.title.replace(/"/g, '\\"')}"\ncreated: ${date}\ntags: []\nrelated: []\n---\n\n`
             const body = `# ${draft.title}\n\n${item.description}\n`
