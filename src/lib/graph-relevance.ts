@@ -26,6 +26,8 @@ export interface RetrievalGraph {
 // ---------------------------------------------------------------------------
 
 const WIKILINK_REGEX = /\[\[([^\]|]+?)(?:\|[^\]]+?)?\]\]/g
+const GRAPH_FILE_READ_CONCURRENCY = 16
+const MAX_CACHED_RETRIEVAL_GRAPHS = 2
 
 const WEIGHTS = {
   directLink: 3.0,
@@ -46,7 +48,7 @@ const TYPE_AFFINITY: Record<string, Record<string, number>> = {
 // Module-level cache
 // ---------------------------------------------------------------------------
 
-let cachedGraph: RetrievalGraph | null = null
+const cachedGraphs = new Map<string, RetrievalGraph>()
 
 // ---------------------------------------------------------------------------
 // Helpers (pure)
@@ -62,6 +64,23 @@ function flattenMdFiles(nodes: readonly FileNode[]): FileNode[] {
     }
   }
   return files
+}
+
+async function mapWithConcurrency<T, R>(
+  values: readonly T[],
+  limit: number,
+  mapper: (value: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(values.length)
+  let cursor = 0
+  const workers = Array.from({ length: Math.min(limit, values.length) }, async () => {
+    while (cursor < values.length) {
+      const index = cursor++
+      results[index] = await mapper(values[index])
+    }
+  })
+  await Promise.all(workers)
+  return results
 }
 
 function fileNameToId(fileName: string): string {
@@ -156,25 +175,27 @@ export async function buildRetrievalGraph(
   projectPath: string,
   dataVersion: number = 0,
 ): Promise<RetrievalGraph> {
+  const normalizedProjectPath = normalizePath(projectPath)
   // Return cached if version matches
-  if (cachedGraph !== null && cachedGraph.dataVersion === dataVersion) {
+  const cachedGraph = cachedGraphs.get(normalizedProjectPath)
+  if (cachedGraph?.dataVersion === dataVersion) {
     return cachedGraph
   }
 
-  const wikiRoot = `${normalizePath(projectPath)}/wiki`
+  const wikiRoot = `${normalizedProjectPath}/wiki`
   let tree: FileNode[]
   try {
     tree = await listDirectory(wikiRoot)
   } catch {
     const emptyGraph: RetrievalGraph = { nodes: new Map(), dataVersion }
-    cachedGraph = emptyGraph
+    cacheRetrievalGraph(normalizedProjectPath, emptyGraph)
     return emptyGraph
   }
 
   const mdFiles = flattenMdFiles(tree)
 
   // First pass: read all files and build raw node data
-  const rawNodes: Array<{
+  type RawNode = {
     id: string
     title: string
     type: string
@@ -182,28 +203,30 @@ export async function buildRetrievalGraph(
     sources: string[]
     rawLinks: string[]
     fileName: string
-  }> = []
-
-  for (const file of mdFiles) {
-    const id = fileNameToId(file.name)
-    let content = ""
-    try {
-      content = await readFile(file.path)
-    } catch {
-      continue
-    }
-
-    const fm = extractFrontmatter(content)
-    rawNodes.push({
-      id,
-      title: fm.title || file.name.replace(/\.md$/, "").replace(/-/g, " "),
-      type: fm.type,
-      path: file.path,
-      sources: fm.sources,
-      rawLinks: extractWikilinks(content),
-      fileName: file.name,
-    })
   }
+
+  const parsedFiles = await mapWithConcurrency<FileNode, RawNode | null>(
+    mdFiles,
+    GRAPH_FILE_READ_CONCURRENCY,
+    async (file) => {
+      try {
+        const content = await readFile(file.path)
+        const fm = extractFrontmatter(content)
+        return {
+          id: fileNameToId(file.name),
+          title: fm.title || file.name.replace(/\.md$/, "").replace(/-/g, " "),
+          type: fm.type,
+          path: file.path,
+          sources: fm.sources,
+          rawLinks: extractWikilinks(content),
+          fileName: file.name,
+        }
+      } catch {
+        return null
+      }
+    },
+  )
+  const rawNodes = parsedFiles.filter((node): node is RawNode => node !== null)
 
   const nodeIds = new Set(rawNodes.map((n) => n.id))
 
@@ -240,8 +263,17 @@ export async function buildRetrievalGraph(
   }
 
   const graph: RetrievalGraph = { nodes, dataVersion }
-  cachedGraph = graph
+  cacheRetrievalGraph(normalizedProjectPath, graph)
   return graph
+}
+
+function cacheRetrievalGraph(projectPath: string, graph: RetrievalGraph): void {
+  cachedGraphs.delete(projectPath)
+  if (cachedGraphs.size >= MAX_CACHED_RETRIEVAL_GRAPHS) {
+    const oldest = cachedGraphs.keys().next().value
+    if (oldest) cachedGraphs.delete(oldest)
+  }
+  cachedGraphs.set(projectPath, graph)
 }
 
 export function calculateRelevance(
@@ -308,5 +340,5 @@ export function getRelatedNodes(
 }
 
 export function clearGraphCache(): void {
-  cachedGraph = null
+  cachedGraphs.clear()
 }

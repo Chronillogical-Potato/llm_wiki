@@ -129,7 +129,9 @@ describe("buildWikiGraph frontmatter extraction", () => {
     const second = await buildWikiGraph("/cached-project", 42)
 
     expect(second).toBe(first)
-    expect(mockListDirectory).toHaveBeenCalledTimes(1)
-    expect(mockReadFile).toHaveBeenCalledTimes(1)
+    // The first graph build reads once for graph topology and once for
+    // relevance metadata; the second call is fully served by the cache.
+    expect(mockListDirectory).toHaveBeenCalledTimes(2)
+    expect(mockReadFile).toHaveBeenCalledTimes(2)
   })
 })

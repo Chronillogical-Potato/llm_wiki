@@ -34,8 +34,7 @@ export interface WikiGraphResult {
 }
 
 const GRAPH_FILE_READ_CONCURRENCY = 16
-const MAX_WEIGHTED_GRAPH_NODES = 3_000
-const COMMUNITY_WORKER_THRESHOLD = 3_000
+const COMMUNITY_WORKER_THRESHOLD = 500
 const MAX_CACHED_PROJECT_GRAPHS = 2
 const graphCache = new Map<string, { dataVersion: number; result: WikiGraphResult }>()
 const graphBuilds = new Map<string, Promise<WikiGraphResult>>()
@@ -283,14 +282,12 @@ async function buildWikiGraphUncached(projectPath: string): Promise<WikiGraphRes
 
   // Calculate relevance weights using the retrieval graph
   let retrievalGraph: Awaited<ReturnType<typeof buildRetrievalGraph>> | null = null
-  if (nodeMap.size <= MAX_WEIGHTED_GRAPH_NODES) {
-    try {
-      const { useWikiStore } = await import("@/stores/wiki-store")
-      const dv = useWikiStore.getState().dataVersion
-      retrievalGraph = await buildRetrievalGraph(normalizePath(projectPath), dv)
-    } catch {
-      // ignore — weights will default to 1
-    }
+  try {
+    const { useWikiStore } = await import("@/stores/wiki-store")
+    const dv = useWikiStore.getState().dataVersion
+    retrievalGraph = await buildRetrievalGraph(normalizePath(projectPath), dv)
+  } catch {
+    // Keep the graph available with neutral weights if relevance enrichment fails.
   }
 
   const edges: GraphEdge[] = dedupedEdges.map((e) => {
