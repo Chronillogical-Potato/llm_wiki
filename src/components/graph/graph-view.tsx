@@ -1468,8 +1468,8 @@ export function GraphView() {
                         {c.topNodes[0] ?? `${t("graph.cluster", { id: c.id })}`}
                       </span>
                       <span className="text-muted-foreground/60 ml-auto shrink-0">{c.nodeCount}</span>
-                      {c.cohesion < 0.15 && c.nodeCount >= 3 && (
-                        <span className="text-amber-500 shrink-0" title={`Low cohesion: ${c.cohesion.toFixed(2)}`}>!</span>
+                      {c.meanIntraDegree < 2 && c.nodeCount >= 3 && (
+                        <span className="text-amber-500 shrink-0" title={`Low internal connectivity: ${c.meanIntraDegree.toFixed(1)} links per page`}>!</span>
                       )}
                     </div>
                   ))}

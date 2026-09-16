@@ -24,6 +24,7 @@ export interface CommunityInfo {
   id: number
   nodeCount: number
   cohesion: number // intra-community edge density
+  meanIntraDegree: number // average internal links per page; scale-independent
   topNodes: string[] // top nodes by linkCount (labels)
 }
 
