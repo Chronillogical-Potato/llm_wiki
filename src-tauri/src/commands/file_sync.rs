@@ -24,7 +24,12 @@ const MAX_HASH_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_RETRY_COUNT: u32 = 3;
 const APP_WRITE_IGNORE_MS: i64 = 4_000;
 const QUEUE_EMIT_EVERY: usize = 25;
-const LINUX_RESCAN_INTERVAL_MS: i64 = 10_000;
+// Native watcher backends can lose events after overflow, sleep/wake, network
+// share reconnects, or long Windows sessions without terminating the watcher.
+// A low-frequency snapshot reconciliation makes the watcher self-healing on
+// every supported platform while keeping steady-state filesystem load small.
+const LINUX_WATCHER_RESCAN_INTERVAL_MS: i64 = 10_000;
+const OTHER_WATCHER_RESCAN_INTERVAL_MS: i64 = 60_000;
 const DEFAULT_SOURCE_WATCH_CONFIG_JSON: &str =
     include_str!("../../../src/lib/source-watch-defaults.json");
 
@@ -518,10 +523,14 @@ fn maybe_periodic_rescan(
     watcher_generation: u64,
     last_periodic_rescan: &mut i64,
 ) {
-    if !cfg!(target_os = "linux") || now_ms() - *last_periodic_rescan < LINUX_RESCAN_INTERVAL_MS {
+    let interval = if cfg!(target_os = "linux") {
+        LINUX_WATCHER_RESCAN_INTERVAL_MS
+    } else {
+        OTHER_WATCHER_RESCAN_INTERVAL_MS
+    };
+    if now_ms() - *last_periodic_rescan < interval {
         return;
     }
-    *last_periodic_rescan = now_ms();
     let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
         rescan_watch_roots(
             app,
@@ -531,6 +540,7 @@ fn maybe_periodic_rescan(
             watcher_generation,
         )
     }));
+    *last_periodic_rescan = now_ms();
     match result {
         Ok(Ok(())) => {}
         Ok(Err(err)) => eprintln!("[file-sync] periodic rescan failed: {err}"),
@@ -548,12 +558,15 @@ fn rescan_watch_roots(
     if !is_active_watcher_generation(watcher_generation) {
         return Ok(());
     }
-    enqueue_rescan_changes_for_prefixes(
-        root,
-        project_id,
-        &["raw/sources", "wiki", "purpose.md", "schema.md"],
-        source_watch_config,
-    )?;
+    // Linux retains the broader reconciliation because recursive inotify
+    // watches can miss subtree creation. Other platforms reconcile source
+    // inputs only to avoid a recurring generated-wiki scan.
+    let prefixes = if cfg!(target_os = "linux") {
+        &["raw/sources", "wiki", "purpose.md", "schema.md"][..]
+    } else {
+        &["raw/sources"][..]
+    };
+    enqueue_rescan_changes_for_prefixes(root, project_id, prefixes, source_watch_config)?;
     if !is_active_watcher_generation(watcher_generation) {
         return Ok(());
     }
@@ -687,6 +700,7 @@ fn enqueue_rescan_changes_for_prefixes(
 ) -> Result<(), String> {
     let rules = SourceWatchRules::new(source_watch_config);
     let mut rels = BTreeSet::<String>::new();
+    let mut app_written_rels = BTreeSet::<String>::new();
     let snapshot = with_queue_lock(root, || read_snapshot(root))?;
     for prefix in prefixes {
         let path = root.join(prefix);
@@ -697,6 +711,10 @@ fn enqueue_rescan_changes_for_prefixes(
                 &rules,
                 fs::metadata(&path).ok().map(|m| m.len()),
             ) {
+                if is_app_write_ignored(&path) {
+                    app_written_rels.insert(rel);
+                    continue;
+                }
                 let old = snapshot.files.get(&rel);
                 let fast = read_meta_fast(root, &rel)?;
                 if old.map(|m| (m.size, m.mtime_ms)) != fast.as_ref().map(|m| (m.size, m.mtime_ms))
@@ -713,6 +731,10 @@ fn enqueue_rescan_changes_for_prefixes(
                         &rules,
                         entry.metadata().ok().map(|m| m.len()),
                     ) {
+                        if is_app_write_ignored(entry.path()) {
+                            app_written_rels.insert(rel);
+                            continue;
+                        }
                         let old = snapshot.files.get(&rel);
                         let fast = read_meta_fast(root, &rel)?;
                         if old.map(|m| (m.size, m.mtime_ms))
@@ -736,6 +758,9 @@ fn enqueue_rescan_changes_for_prefixes(
         }
     }
 
+    if !app_written_rels.is_empty() {
+        sync_snapshot_paths(root, app_written_rels)?;
+    }
     enqueue_paths(root, project_id, rels)
 }
 
@@ -1568,18 +1593,14 @@ mod tests {
             vec![rel.to_string()],
         )
         .unwrap();
-        enqueue_rescan_changes_for_prefixes(
-            &root,
-            "p1",
-            &["raw/sources"],
-            &default_watch_config(),
-        )
-        .unwrap();
+        enqueue_rescan_changes_for_prefixes(&root, "p1", &["raw/sources"], &default_watch_config())
+            .unwrap();
 
         let queue = read_queue(&root).unwrap();
-        assert!(queue.tasks.iter().any(|task| {
-            task.path == rel && task.kind == FileChangeKind::Created
-        }));
+        assert!(queue
+            .tasks
+            .iter()
+            .any(|task| { task.path == rel && task.kind == FileChangeKind::Created }));
         let _ = fs::remove_dir_all(root);
     }
 

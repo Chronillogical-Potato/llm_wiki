@@ -148,13 +148,11 @@ describe("ingest-queue — enqueue & basic processing", () => {
     const persisted = JSON.parse(String(inactiveWrite?.[1])) as Array<{
       sourcePath: string
       status: string
-      autoStart?: boolean
     }>
     expect(persisted).toMatchObject([
       {
         sourcePath: "raw/sources/scheduled-import/report.pdf",
         status: "pending",
-        autoStart: true,
       },
     ])
 
@@ -212,7 +210,6 @@ describe("ingest-queue — enqueue & basic processing", () => {
             addedAt: 1,
             error: null,
             retryCount: 0,
-            autoStart: true,
           },
           {
             id: "keep-me",
@@ -223,7 +220,6 @@ describe("ingest-queue — enqueue & basic processing", () => {
             addedAt: 2,
             error: null,
             retryCount: 0,
-            autoStart: true,
           },
         ])
       }
@@ -821,7 +817,7 @@ describe("ingest-queue — restoreQueue", () => {
     expect(getQueue()).toHaveLength(0)
   })
 
-  it("converts 'processing' tasks back to 'pending' on restore (interrupted by app close)", async () => {
+  it("restarts an interrupted processing task on restore", async () => {
     const saved = [
       {
         id: "ingest-abc",
@@ -834,14 +830,15 @@ describe("ingest-queue — restoreQueue", () => {
       },
     ]
     mockReadFile.mockResolvedValue(JSON.stringify(saved))
+    mockAutoIngest.mockImplementation(() => new Promise(() => {}))
     await restoreQueue(TEST_ID, TEST_PATH)
     await flushMicrotasks(2)
 
     const queue = getQueue()
     expect(queue).toHaveLength(1)
-    expect(queue[0].status).toBe("pending")
-    expect(getQueueSummary().paused).toBe(true)
-    expect(mockAutoIngest).not.toHaveBeenCalled()
+    expect(queue[0].status).toBe("processing")
+    expect(getQueueSummary().paused).toBe(false)
+    expect(mockAutoIngest).toHaveBeenCalledTimes(1)
   })
 
   it("leaves 'failed' tasks as failed on restore", async () => {
@@ -882,14 +879,15 @@ describe("ingest-queue — restoreQueue", () => {
     mockAutoIngest.mockImplementation(() => new Promise(() => {}))
 
     await restoreQueue(TEST_ID, TEST_PATH)
+    await flushMicrotasks(2)
     const queue = getQueue()
     expect(queue).toHaveLength(1)
     expect(queue[0].projectId).toBe(TEST_ID)
-    expect(queue[0].status).toBe("pending")
-    expect(mockAutoIngest).not.toHaveBeenCalled()
+    expect(queue[0].status).toBe("processing")
+    expect(mockAutoIngest).toHaveBeenCalledTimes(1)
   })
 
-  it("resumeProcessing starts restored pending tasks", async () => {
+  it("automatically resumes restored pending tasks", async () => {
     const saved = [
       {
         id: "ingest-restored",
@@ -905,11 +903,6 @@ describe("ingest-queue — restoreQueue", () => {
     mockAutoIngest.mockResolvedValue(["wiki/sources/restored.md"])
 
     await restoreQueue(TEST_ID, TEST_PATH)
-    await flushMicrotasks(2)
-    expect(mockAutoIngest).not.toHaveBeenCalled()
-    expect(getQueueSummary().paused).toBe(true)
-
-    resumeProcessing()
     await flushMicrotasks(10)
 
     expect(mockAutoIngest).toHaveBeenCalledTimes(1)
@@ -917,7 +910,62 @@ describe("ingest-queue — restoreQueue", () => {
     expect(getQueueSummary().paused).toBe(false)
   })
 
-  it("runs new live tasks while restored backlog waits for manual resume", async () => {
+  it("keeps restored tasks pending when the ingest model is not configured", async () => {
+    const { useWikiStore } = await import("@/stores/wiki-store")
+    useWikiStore.getState().setLlmConfig({
+      provider: "openai",
+      apiKey: "",
+      model: "",
+      ollamaUrl: "",
+      customEndpoint: "",
+      maxContextSize: 128000,
+    })
+    mockReadFile.mockResolvedValue(JSON.stringify([
+      {
+        id: "pending-a",
+        sourcePath: "a.md",
+        folderContext: "",
+        status: "pending",
+        addedAt: 0,
+        error: null,
+        retryCount: 0,
+      },
+      {
+        id: "pending-b",
+        sourcePath: "b.md",
+        folderContext: "",
+        status: "pending",
+        addedAt: 0,
+        error: null,
+        retryCount: 0,
+      },
+    ]))
+
+    await restoreQueue(TEST_ID, TEST_PATH)
+    await flushMicrotasks(4)
+
+    expect(getQueue().map((task) => task.status)).toEqual(["pending", "pending"])
+    expect(getQueueSummary().blockedOnLlmConfig).toBe(true)
+    expect(mockAutoIngest).not.toHaveBeenCalled()
+
+    useWikiStore.getState().setLlmConfig({
+      provider: "openai",
+      apiKey: "configured",
+      model: "model",
+      ollamaUrl: "",
+      customEndpoint: "",
+      maxContextSize: 128000,
+    })
+    mockAutoIngest.mockResolvedValue(["wiki/sources/restored.md"])
+    resumeProcessing()
+    await flushMicrotasks(20)
+
+    expect(mockAutoIngest).toHaveBeenCalledTimes(2)
+    expect(getQueue()).toHaveLength(0)
+    expect(getQueueSummary().blockedOnLlmConfig).toBe(false)
+  })
+
+  it("finishes restored backlog before accepting a new live task", async () => {
     const saved = [
       {
         id: "ingest-restored",
@@ -930,20 +978,23 @@ describe("ingest-queue — restoreQueue", () => {
       },
     ]
     mockReadFile.mockResolvedValue(JSON.stringify(saved))
-    mockAutoIngest.mockResolvedValue(["wiki/sources/live.md"])
+    mockAutoIngest.mockImplementation(async (_projectPath, sourcePath) => [
+      `wiki/sources/${String(sourcePath).replace(/\.md$/, "")}.md`,
+    ])
 
     await restoreQueue(TEST_ID, TEST_PATH)
     await flushMicrotasks(2)
     await enqueueIngest(TEST_ID, "live.md")
     await flushMicrotasks(10)
 
-    expect(mockAutoIngest).toHaveBeenCalledTimes(1)
-    expect(mockAutoIngest.mock.calls[0][1]).toBe(`${TEST_PATH}/live.md`)
-    expect(getQueue().map((task) => task.sourcePath)).toEqual(["restored.md"])
-    expect(getQueueSummary().paused).toBe(true)
+    expect(mockAutoIngest).toHaveBeenCalledTimes(2)
+    expect(mockAutoIngest.mock.calls[0][1]).toBe(`${TEST_PATH}/restored.md`)
+    expect(mockAutoIngest.mock.calls[1][1]).toBe(`${TEST_PATH}/live.md`)
+    expect(getQueue()).toHaveLength(0)
+    expect(getQueueSummary().paused).toBe(false)
   })
 
-  it("distinguishes active live processing from user pause while restored backlog waits", async () => {
+  it("reports an automatically restored task as active processing", async () => {
     const saved = [
       {
         id: "ingest-restored",
@@ -960,18 +1011,14 @@ describe("ingest-queue — restoreQueue", () => {
 
     await restoreQueue(TEST_ID, TEST_PATH)
     await flushMicrotasks(2)
-    await enqueueIngest(TEST_ID, "live.md")
-    await flushMicrotasks(2)
-
     expect(getQueueSummary()).toMatchObject({
       processing: 1,
       paused: false,
       userPaused: false,
-      restoredBacklogWaiting: true,
     })
   })
 
-  it("promotes a restored task when a live event touches the same source", async () => {
+  it("queues a rerun when a live event touches a restored task already processing", async () => {
     const saved = [
       {
         id: "ingest-restored",
@@ -984,14 +1031,23 @@ describe("ingest-queue — restoreQueue", () => {
       },
     ]
     mockReadFile.mockResolvedValue(JSON.stringify(saved))
-    mockAutoIngest.mockResolvedValue(["wiki/sources/same.md"])
+    const firstRun = createDeferred<string[]>()
+    mockAutoIngest
+      .mockImplementationOnce(() => firstRun.promise)
+      .mockResolvedValueOnce(["wiki/sources/same.md"])
 
     await restoreQueue(TEST_ID, TEST_PATH)
     await flushMicrotasks(2)
     await enqueueIngest(TEST_ID, "same.md")
-    await flushMicrotasks(10)
+    await flushMicrotasks(2)
 
     expect(mockAutoIngest).toHaveBeenCalledTimes(1)
+    expect(getQueue().filter((task) => task.status === "pending")).toHaveLength(1)
+
+    firstRun.resolve(["wiki/sources/same.md"])
+    await flushMicrotasks(10)
+
+    expect(mockAutoIngest).toHaveBeenCalledTimes(2)
     expect(mockAutoIngest.mock.calls[0][1]).toBe(`${TEST_PATH}/same.md`)
     expect(getQueue()).toHaveLength(0)
     expect(getQueueSummary().paused).toBe(false)
