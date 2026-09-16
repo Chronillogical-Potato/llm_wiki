@@ -24,6 +24,9 @@ const PORT: u16 = 19828;
 const API_PREFIX: &str = "/api/v1";
 const MAX_BODY_BYTES: usize = 1024 * 1024;
 const MAX_CHAT_BODY_BYTES: usize = 40 * 1024 * 1024;
+// JSON may encode one input byte as a six-byte `\u00XX` escape. Keep the
+// transport boundary above the authoritative 2 MiB decoded-content limit.
+const MAX_PAGE_WRITE_BODY_BYTES: usize = 6 * 2 * 1024 * 1024 + 16 * 1024;
 const MAX_FILE_CONTENT_BYTES: u64 = 2 * 1024 * 1024;
 const DEFAULT_MAX_FILES: usize = 2_000;
 const HARD_MAX_FILES: usize = 10_000;
@@ -374,6 +377,9 @@ fn handle_request(
         (&Method::Post, ["projects", project_id, "pages", "embed"]) => {
             handle_embed_page(app, project_id, body)
         }
+        (&Method::Post, ["projects", project_id, "pages", "write"]) => {
+            handle_write_page(app, project_id, body)
+        }
         (&Method::Post, ["projects", project_id, "chat"]) => handle_chat(app, project_id, body),
         (&Method::Post, ["projects", project_id, "chat", session_id, "cancel"]) => {
             handle_cancel_chat(app, project_id, session_id)
@@ -425,7 +431,11 @@ fn is_token_required_request(method: &Method, path: &str) -> bool {
     let Some(parts) = api_path_parts(path) else {
         return false;
     };
-    method == &Method::Post && matches!(parts.as_slice(), ["projects", _, "pages", "embed"])
+    method == &Method::Post
+        && matches!(
+            parts.as_slice(),
+            ["projects", _, "pages", "embed"] | ["projects", _, "pages", "write"]
+        )
 }
 
 fn chat_project_id<'a>(method: &Method, path: &'a str) -> Option<&'a str> {
@@ -481,15 +491,13 @@ fn wants_streaming_chat(
 fn body_limit_for_request(method: &Method, url: &str) -> usize {
     let (path, _) = split_url(url);
     let parts = api_path_parts(&path);
-    if method == &Method::Post
-        && parts
-            .as_deref()
-            .map(|parts| matches!(parts, ["projects", _, "chat"]))
-            .unwrap_or(false)
-    {
-        MAX_CHAT_BODY_BYTES
-    } else {
-        MAX_BODY_BYTES
+    if method != &Method::Post {
+        return MAX_BODY_BYTES;
+    }
+    match parts.as_deref() {
+        Some(["projects", _, "chat"]) => MAX_CHAT_BODY_BYTES,
+        Some(["projects", _, "pages", "write"]) => MAX_PAGE_WRITE_BODY_BYTES,
+        _ => MAX_BODY_BYTES,
     }
 }
 
@@ -1776,6 +1784,55 @@ struct EmbedPageRequest {
     path: String,
     #[serde(default)]
     force: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WritePageRequest {
+    path: String,
+    content: String,
+    #[serde(default)]
+    allow_overwrite: bool,
+}
+
+fn handle_write_page(app: &AppHandle, project_id: &str, body: &str) -> ApiResponse {
+    let project = match resolve_project(app, project_id) {
+        Ok(project) => project,
+        Err(e) => return err(404, e),
+    };
+    let req: WritePageRequest = match serde_json::from_str(body) {
+        Ok(req) => req,
+        Err(e) => return err(400, format!("Invalid JSON: {e}")),
+    };
+    if req.path.trim().is_empty() {
+        return err(400, "path is required");
+    }
+    match agent::tools::write_wiki_page_verified(
+        &project.path,
+        &req.path,
+        &req.content,
+        req.allow_overwrite,
+    ) {
+        Ok(result) => ok(json!({
+            "ok": true,
+            "projectId": project.id,
+            "result": result,
+        })),
+        Err(error) => {
+            let lower = error.to_ascii_lowercase();
+            let status = if lower.contains("without allowoverwrite") {
+                409
+            } else if lower.contains("path")
+                || lower.contains("markdown file")
+                || lower.contains("too large")
+            {
+                400
+            } else {
+                500
+            };
+            err(status, error)
+        }
+    }
 }
 
 struct PageEmbedSlot;
@@ -3626,6 +3683,10 @@ mod tests {
             body_limit_for_request(&Method::Post, "/api/v1/projects/current/search"),
             MAX_BODY_BYTES
         );
+        assert_eq!(
+            body_limit_for_request(&Method::Post, "/api/v1/projects/current/pages/write"),
+            MAX_PAGE_WRITE_BODY_BYTES
+        );
     }
 
     #[test]
@@ -3653,6 +3714,10 @@ mod tests {
         assert!(is_token_required_request(
             &Method::Post,
             "/api/v1/projects/current/pages/embed"
+        ));
+        assert!(is_token_required_request(
+            &Method::Post,
+            "/api/v1/projects/current/pages/write"
         ));
         assert!(is_token_required_request(
             &Method::Post,

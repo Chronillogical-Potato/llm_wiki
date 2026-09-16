@@ -115,6 +115,51 @@ test("embedPage rejects malformed success payloads", async () => {
   )
 })
 
+test("writePage posts exact content and requires verified persistence", async () => {
+  const fetchImpl: typeof fetch = async (input, init) => {
+    assert.equal(String(input), "http://127.0.0.1:19828/api/v1/projects/project%20a/pages/write")
+    assert.equal(init?.method, "POST")
+    assert.deepEqual(JSON.parse(String(init?.body)), {
+      path: "wiki/ops/page.md",
+      content: "# Exact\n",
+      allowOverwrite: true,
+    })
+    return new Response(JSON.stringify({
+      ok: true,
+      result: {
+        path: "wiki/ops/page.md",
+        bytes: 8,
+        allowOverwrite: true,
+        verified: true,
+        existedBefore: true,
+      },
+    }), { status: 200 })
+  }
+  const client = new LlmWikiApiClient({ fetchImpl })
+
+  assert.deepEqual(await client.writePage("wiki/ops/page.md", "# Exact\n", "project a", true), {
+    path: "wiki/ops/page.md",
+    bytes: 8,
+    allowOverwrite: true,
+    verified: true,
+    existedBefore: true,
+  })
+})
+
+test("writePage rejects an unverified success response", async () => {
+  const client = new LlmWikiApiClient({
+    fetchImpl: async () => new Response(JSON.stringify({
+      ok: true,
+      result: { path: "wiki/page.md", bytes: 1, verified: false },
+    }), { status: 200 }),
+  })
+
+  await assert.rejects(
+    () => client.writePage("wiki/page.md", "x"),
+    /verified: expected true/,
+  )
+})
+
 test("chat posts agent request and parses references", async () => {
   let url = ""
   let body = ""

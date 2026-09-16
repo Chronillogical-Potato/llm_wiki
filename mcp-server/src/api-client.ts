@@ -46,6 +46,14 @@ export interface ApiPageEmbeddingResult {
   status: string
 }
 
+export interface ApiPageWriteResult {
+  path: string
+  bytes: number
+  allowOverwrite: boolean
+  verified: boolean
+  existedBefore: boolean
+}
+
 export interface ApiChatReference {
   title: string
   path: string
@@ -349,6 +357,29 @@ export class LlmWikiApiClient {
       chunks: requireNumber(result.chunks, "page embedding result.chunks"),
       vectorsWritten: requireNumber(result.vectorsWritten, "page embedding result.vectorsWritten"),
       status: requireString(result.status, "page embedding result.status"),
+    }
+  }
+
+  async writePage(
+    path: string,
+    content: string,
+    projectId = "current",
+    allowOverwrite = false,
+  ): Promise<ApiPageWriteResult> {
+    const json = await this.request(`/projects/${encodeURIComponent(projectId)}/pages/write`, {
+      method: "POST",
+      body: { path, content, allowOverwrite },
+    })
+    const result = requireObject(json.result, "page write result")
+    if (result.verified !== true) {
+      throw new Error("page write result.verified: expected true")
+    }
+    return {
+      path: requireString(result.path, "page write result.path"),
+      bytes: requireNumber(result.bytes, "page write result.bytes"),
+      allowOverwrite: result.allowOverwrite === true,
+      verified: true,
+      existedBefore: result.existedBefore === true,
     }
   }
 

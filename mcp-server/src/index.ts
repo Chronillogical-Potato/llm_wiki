@@ -22,6 +22,7 @@ import { McpProjectBinding, withActiveProject } from "./project-binding.js"
 
 const DEFAULT_PROJECT_ID = "current"
 const MAX_TEXT_BYTES = 120_000
+const MAX_WRITE_PAGE_BYTES = 2 * 1024 * 1024
 
 const client = new LlmWikiApiClient()
 const projectBinding = new McpProjectBinding()
@@ -185,6 +186,21 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         additionalProperties: false,
       },
     },
+    {
+      name: "llm_wiki_write_page",
+      description: "Create or explicitly overwrite one Markdown page under wiki/. Success is returned only after byte-for-byte persistence verification.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          project_id: { type: "string", description: "Project UUID, project path, or 'current'. Defaults to current." },
+          path: { type: "string", description: "Canonical project-relative Markdown path under wiki/." },
+          content: { type: "string", description: "Exact UTF-8 page content to persist." },
+          allow_overwrite: { type: "boolean", description: "Defaults to false. Must be true to replace an existing page." },
+        },
+        required: ["path", "content"],
+        additionalProperties: false,
+      },
+    },
   ],
 }))
 
@@ -295,6 +311,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const result = await client.embedPage(path, scope.id, boolArg(args.force, false))
         return textResult(withActiveProject(JSON.stringify(result, null, 2), scope.project, scope.id))
       }
+      case "llm_wiki_write_page": {
+        await assertMcpEnabled()
+        const path = wikiWritePathArg(args.path)
+        const content = writeContentArg(args.content)
+        const scope = await resolveProjectScope(args)
+        const result = await client.writePage(
+          path,
+          content,
+          scope.id,
+          boolArg(args.allow_overwrite, false),
+        )
+        return textResult(withActiveProject(JSON.stringify(result, null, 2), scope.project, scope.id))
+      }
       default:
         throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${request.params.name}`)
     }
@@ -355,6 +384,31 @@ function scopedErrorMessage(error: unknown): string {
 function stringArg(value: unknown, name: string): string {
   if (typeof value !== "string" || value.trim() === "") {
     throw new McpError(ErrorCode.InvalidParams, `${name} is required`)
+  }
+  return value
+}
+
+function wikiWritePathArg(value: unknown): string {
+  const path = stringArg(value, "path")
+  if (Buffer.byteLength(path, "utf8") > 4_096) {
+    throw new McpError(ErrorCode.InvalidParams, "path is too large")
+  }
+  if (path.includes("\\") || path.startsWith("/") || !path.startsWith("wiki/") || !path.endsWith(".md")) {
+    throw new McpError(ErrorCode.InvalidParams, "path must be a canonical Markdown path under wiki/")
+  }
+  const segments = path.split("/")
+  if (segments.some((segment) => !segment || segment === "." || segment === ".." || segment.startsWith("."))) {
+    throw new McpError(ErrorCode.InvalidParams, "path contains a noncanonical component")
+  }
+  return path
+}
+
+function writeContentArg(value: unknown): string {
+  if (typeof value !== "string") {
+    throw new McpError(ErrorCode.InvalidParams, "content is required")
+  }
+  if (Buffer.byteLength(value, "utf8") > MAX_WRITE_PAGE_BYTES) {
+    throw new McpError(ErrorCode.InvalidParams, "content is too large")
   }
   return value
 }
