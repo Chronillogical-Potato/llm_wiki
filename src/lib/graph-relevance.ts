@@ -160,20 +160,28 @@ function extractWikilinks(content: string): string[] {
   return links
 }
 
-function resolveTarget(
-  raw: string,
-  nodeIds: ReadonlySet<string>,
-): string | null {
-  if (nodeIds.has(raw)) return raw
+interface TargetResolver {
+  readonly nodeIds: ReadonlySet<string>
+  readonly aliases: ReadonlyMap<string, string>
+}
 
-  const normalized = raw.toLowerCase().replace(/\s+/g, "-")
+function normalizeLinkKey(value: string): string {
+  return value.toLowerCase().replace(/\s+/g, "-")
+}
+
+function buildTargetResolver(nodeIds: ReadonlySet<string>): TargetResolver {
+  const aliases = new Map<string, string>()
   for (const id of nodeIds) {
-    const idLower = id.toLowerCase()
-    if (idLower === normalized) return id
-    if (idLower === raw.toLowerCase()) return id
-    if (idLower.replace(/\s+/g, "-") === normalized) return id
+    const normalized = normalizeLinkKey(id)
+    // Preserve the original directory-listing order for alias collisions.
+    if (!aliases.has(normalized)) aliases.set(normalized, id)
   }
-  return null
+  return { nodeIds, aliases }
+}
+
+function resolveTarget(raw: string, resolver: TargetResolver): string | null {
+  if (resolver.nodeIds.has(raw)) return raw
+  return resolver.aliases.get(normalizeLinkKey(raw)) ?? null
 }
 
 function getNeighbors(node: RetrievalNode): ReadonlySet<string> {
@@ -249,6 +257,7 @@ export async function buildRetrievalGraph(
   const rawNodes = parsedFiles.filter((node): node is RawNode => node !== null)
 
   const nodeIds = new Set(rawNodes.map((n) => n.id))
+  const targetResolver = buildTargetResolver(nodeIds)
 
   // Second pass: resolve links and build graph nodes
   const outLinksMap = new Map<string, Set<string>>()
@@ -261,7 +270,7 @@ export async function buildRetrievalGraph(
 
   for (const raw of rawNodes) {
     for (const linkTarget of raw.rawLinks) {
-      const resolvedId = resolveTarget(linkTarget, nodeIds)
+      const resolvedId = resolveTarget(linkTarget, targetResolver)
       if (resolvedId === null || resolvedId === raw.id) continue
       outLinksMap.get(raw.id)!.add(resolvedId)
       inLinksMap.get(resolvedId)!.add(raw.id)
