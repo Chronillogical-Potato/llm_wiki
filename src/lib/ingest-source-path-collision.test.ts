@@ -20,6 +20,8 @@ let abortDuringReview: AbortController | null = null
 let interactiveGenerationOverride = ""
 let mergeRequestCount = 0
 let truncateGenerationOnce = false
+let emptyGenerationOnce = false
+let confirmResumeCompleteOnce = false
 
 vi.mock("./llm-client", () => ({
   streamChat: vi.fn(async (_cfg, messages, cb) => {
@@ -104,6 +106,18 @@ vi.mock("./llm-client", () => ({
       return
     }
 
+    if (emptyGenerationOnce) {
+      emptyGenerationOnce = false
+      cb.onDone({ finishReason: "stop", truncated: false })
+      return
+    }
+    if (confirmResumeCompleteOnce) {
+      confirmResumeCompleteOnce = false
+      cb.onToken("---RESUME COMPLETE---")
+      cb.onDone({ finishReason: "stop", truncated: false })
+      return
+    }
+
     const marker = sourceMarkers.shift() ?? "unknown project"
     const targetPath = targetMatch[1]
     const sourceIdentity =
@@ -160,6 +174,8 @@ describe("autoIngest source summary paths", () => {
     interactiveGenerationOverride = ""
     mergeRequestCount = 0
     truncateGenerationOnce = false
+    emptyGenerationOnce = false
+    confirmResumeCompleteOnce = false
     mockStreamChat.mockClear()
     mockParseWithMineru.mockReset()
     tmp = await createTempProject("same-basename-sources")
@@ -749,7 +765,13 @@ describe("autoIngest source summary paths", () => {
     await expect(fs.readFile(`${tmp.path}/wiki/goals/preserved.md`, "utf8"))
       .resolves.toContain("# Preserved")
 
-    generationSuffix = ""
+    emptyGenerationOnce = true
+    await expect(autoIngest(tmp.path, sourcePath, useWikiStore.getState().llmConfig))
+      .rejects.toThrow("resume returned no complete wiki file")
+    await expect(fs.readdir(`${tmp.path}/.llm-wiki/ingest-generation`))
+      .resolves.toHaveLength(1)
+
+    confirmResumeCompleteOnce = true
     await autoIngest(tmp.path, sourcePath, useWikiStore.getState().llmConfig)
 
     const generationCalls = mockStreamChat.mock.calls.filter(([, messages]) =>

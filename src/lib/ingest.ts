@@ -1158,6 +1158,7 @@ async function autoIngestImpl(
                   "The following FILE paths were already written successfully in an earlier attempt.",
                   "Do not emit them again. Emit only the remaining pages required by the analysis:",
                   ...previouslyCompletedPaths.map((path) => `- ${path}`),
+                  "If every required page is already complete, return exactly `---RESUME COMPLETE---`.",
                 ].join("\n")
               : "",
             "",
@@ -1194,10 +1195,22 @@ async function autoIngestImpl(
     generationError = err instanceof Error ? err.message : String(err)
   }
 
-  if ((generationError || generationTruncated) && parseFileBlocks(generation).blocks.length === 0) {
+  const parsedGeneration = parseFileBlocks(generation)
+  const resumeConfirmedComplete = previouslyCompletedPaths.length > 0 &&
+    generation.trim() === "---RESUME COMPLETE---"
+  if ((generationError || generationTruncated) && parsedGeneration.blocks.length === 0) {
     const message = generationError
       ? `Generation failed before any complete wiki file was produced: ${generationError}`
       : "Generation was truncated before any complete wiki file was produced."
+    activity.updateItem(activityId, { status: "error", detail: message })
+    throw new Error(message)
+  }
+  if (
+    previouslyCompletedPaths.length > 0 &&
+    !resumeConfirmedComplete &&
+    parsedGeneration.blocks.length === 0
+  ) {
+    const message = "Generation resume returned no complete wiki file and did not confirm completion."
     activity.updateItem(activityId, { status: "error", detail: message })
     throw new Error(message)
   }
@@ -1470,7 +1483,12 @@ async function autoIngestImpl(
   // incomplete result. Throwing here keeps the queue task visible as
   // pending/failed instead of removing it as "done" while Sources reports the
   // same file as not ingested.
-  const generationIncomplete = Boolean(generationError) || generationTruncated
+  const resumeProducedNoValidFiles = previouslyCompletedPaths.length > 0 &&
+    !resumeConfirmedComplete &&
+    writeResult.writtenPaths.length === 0
+  const generationIncomplete = Boolean(generationError) ||
+    generationTruncated ||
+    resumeProducedNoValidFiles
   if (generationIncomplete && writtenPaths.length > 0) {
     try {
       await saveGenerationCheckpoint(generationProgressPath, {
@@ -1491,6 +1509,7 @@ async function autoIngestImpl(
     const reasons = [
       generationError ? `generation stream failed: ${generationError}` : "",
       generationTruncated ? "generation reached its output limit" : "",
+      resumeProducedNoValidFiles ? "generation resume produced no valid wiki files" : "",
       hardFailures.length > 0
         ? `${hardFailures.length} wiki file write failure(s)`
         : "",
