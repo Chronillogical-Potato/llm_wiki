@@ -892,4 +892,24 @@ describe("autoIngest source summary paths", () => {
     expect(written).toEqual([])
     await expect(fs.access(path.join(tmp.path, "escape.md"))).rejects.toThrow()
   })
+
+  it("sanitizes malformed citation links in interactive writes", async () => {
+    if (!tmp) throw new Error("missing temp project")
+    interactiveGenerationOverride = [
+      "---FILE: wiki/entities/citations.md---",
+      "---",
+      "type: entity",
+      "title: Citations",
+      "---",
+      "Evidence [[1]] and [[target|label].",
+      "---END FILE---",
+    ].join("\n")
+    useChatStore.setState({ ingestSource: null })
+
+    const written = await executeIngestWrites(tmp.path, useWikiStore.getState().llmConfig)
+
+    expect(written).toHaveLength(1)
+    const content = await fs.readFile(written[0], "utf8")
+    expect(content).toContain("Evidence [1] and [[target|label]].")
+  })
 })

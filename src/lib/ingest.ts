@@ -3524,6 +3524,8 @@ async function executeIngestWritesImpl(
       continue
     }
 
+    content = sanitizeIngestedFileContent(content)
+
     if (
       activeSourceIdentity &&
       !isLogPath(relativePath) &&

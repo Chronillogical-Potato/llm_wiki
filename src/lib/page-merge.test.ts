@@ -44,6 +44,14 @@ describe("mergePageContent — fast paths", () => {
     expect(merger).not.toHaveBeenCalled()
   })
 
+  it("repairs malformed citations on an otherwise byte-identical page", async () => {
+    const merger = vi.fn()
+    const content = PAGE("type: entity\ntitle: Foo", "Evidence [[1]].")
+    const out = await mergePageContent(content, content, merger, baseOpts)
+    expect(out).toContain("Evidence [1].")
+    expect(merger).not.toHaveBeenCalled()
+  })
+
   it("skips LLM when bodies are identical (only sources differ)", async () => {
     // Re-ingest of the same file from a different source just adds
     // its source filename — body is byte-identical. Don't waste an
@@ -181,6 +189,18 @@ describe("mergePageContent — LLM merge", () => {
     const out = await mergePageContent(incoming, existing, merger, baseOpts)
     expect(out).toContain("type: entity")
     expect(out).not.toContain("type: concept")
+  })
+
+  it("normalizes malformed citations introduced by the merge model", async () => {
+    const existing = PAGE("type: entity\ntitle: Foo", "Existing detailed evidence for the topic.")
+    const incoming = PAGE("type: entity\ntitle: Foo", "Incoming detailed evidence for the topic.")
+    const merger = vi.fn().mockResolvedValue(PAGE(
+      "type: entity\ntitle: Foo",
+      "Existing and incoming evidence are retained [[1]] with sources [[2], [3]].",
+    ))
+
+    const out = await mergePageContent(incoming, existing, merger, baseOpts)
+    expect(out).toContain("retained [1] with sources [2], [3].")
   })
 
   it("strips directory prefixes from merged body wikilinks only", async () => {

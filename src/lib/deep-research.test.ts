@@ -80,6 +80,16 @@ describe("buildResearchPageContent", () => {
     expect(content).toContain("![[media/chart.png]]")
   })
 
+  it("normalizes malformed citation wikilinks before saving", () => {
+    const content = buildResearchPageContent(
+      "Topic",
+      "2026-09-27",
+      "Evidence [[1]] and combined [[2], [3], [4]].",
+      "1. [Source](https://example.test) — web",
+    )
+    expect(content).toContain("Evidence [1] and combined [2], [3], [4].")
+  })
+
   it("keeps multiline topics inside one safe YAML scalar and heading", () => {
     const content = buildResearchPageContent(
       "first line\nsecond: \"quoted\"",

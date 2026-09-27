@@ -11,6 +11,7 @@ import { makeQueryFileName } from "@/lib/wiki-filename"
 import { refreshProjectFileTree } from "@/lib/project-file-tree-refresh"
 import { useReviewStore } from "@/stores/review-store"
 import { stripBodyWikilinkPathPrefixes } from "./page-merge"
+import { normalizeMalformedWikilinks } from "./ingest-sanitize"
 
 const MAX_RESEARCH_SOURCES = 20
 const MIN_RESEARCH_CONTENT_CHARS = 120
@@ -30,7 +31,7 @@ export function buildResearchPageContent(
   references: string,
 ): string {
   const displayTopic = topic.replace(/\s+/g, " ").trim()
-  return stripBodyWikilinkPathPrefixes([
+  return normalizeMalformedWikilinks(stripBodyWikilinkPathPrefixes([
     "---",
     "type: query",
     `title: ${JSON.stringify(`Research: ${displayTopic}`)}`,
@@ -47,7 +48,7 @@ export function buildResearchPageContent(
     "",
     references,
     "",
-  ].join("\n"))
+  ].join("\n")))
 }
 
 export async function makeAvailableResearchFilePath(

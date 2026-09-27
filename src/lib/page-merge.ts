@@ -25,6 +25,7 @@
  */
 import { parseFrontmatter } from "./frontmatter"
 import { mergeArrayFieldsIntoContent } from "./sources-merge"
+import { normalizeMalformedWikilinks } from "./ingest-sanitize"
 
 /** Frontmatter array fields unioned across re-ingests. */
 const UNION_FIELDS = ["sources", "tags", "related"] as const
@@ -98,11 +99,11 @@ export async function mergePageContent(
   opts: MergePageOptions,
 ): Promise<string> {
   // Fast path 1: brand-new page.
-  if (!existingContent) return newContent
+  if (!existingContent) return normalizeMalformedWikilinks(newContent)
 
   // Fast path 2: byte-identical — re-ingest of the same source file
   // with no actual change. Stable reference helps callers.
-  if (newContent === existingContent) return existingContent
+  if (newContent === existingContent) return normalizeMalformedWikilinks(existingContent)
 
   // Step 1 — always-on: union the array frontmatter fields.
   const arrayMerged = mergeArrayFieldsIntoContent(
@@ -125,14 +126,14 @@ export async function mergePageContent(
         replacement = setFrontmatterScalar(replacement, field, existingValue)
       }
     }
-    return setFrontmatterScalar(
+    return normalizeMalformedWikilinks(setFrontmatterScalar(
       replacement,
       "updated",
       (opts.today ?? defaultToday)(),
-    )
+    ))
   }
   if (oldParsed.body.trim() === arrayMergedParsed.body.trim()) {
-    return arrayMerged
+    return normalizeMalformedWikilinks(arrayMerged)
   }
 
   // Step 2 — ask the merger to produce a unified body. Failures fall
@@ -150,7 +151,7 @@ export async function mergePageContent(
       `[page-merge] LLM merge failed for ${opts.pagePath}, falling back to incoming + array-field union: ${err instanceof Error ? err.message : err}`,
     )
     await tryBackup(opts, existingContent)
-    return arrayMerged
+    return normalizeMalformedWikilinks(arrayMerged)
   }
 
   // Sanity 1: LLM output must parse as a frontmatter-bearing wiki
@@ -161,7 +162,7 @@ export async function mergePageContent(
       `[page-merge] LLM output for ${opts.pagePath} has no frontmatter — rejecting, falling back`,
     )
     await tryBackup(opts, existingContent)
-    return arrayMerged
+    return normalizeMalformedWikilinks(arrayMerged)
   }
 
   // Sanity 2: body length. Reject obvious truncation / lazy summary.
@@ -174,7 +175,7 @@ export async function mergePageContent(
       `[page-merge] LLM merge for ${opts.pagePath} produced body ${llmBodyLen} chars, below threshold ${minThreshold.toFixed(0)} (max input was ${Math.max(oldBodyLen, newBodyLen)}) — rejecting, falling back`,
     )
     await tryBackup(opts, existingContent)
-    return arrayMerged
+    return normalizeMalformedWikilinks(arrayMerged)
   }
 
   // Step 3 — apply deterministic post-processing: lock fields back
@@ -197,7 +198,7 @@ export async function mergePageContent(
   const todayFn = opts.today ?? defaultToday
   final = setFrontmatterScalar(final, "updated", todayFn())
 
-  return stripBodyWikilinkPathPrefixes(final)
+  return normalizeMalformedWikilinks(stripBodyWikilinkPathPrefixes(final))
 }
 
 /**
