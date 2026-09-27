@@ -338,6 +338,14 @@ interface LongSourceCheckpoint {
   updatedAt: number
 }
 
+interface GenerationCheckpoint {
+  version: 1
+  sourceIdentity: string
+  sourceFingerprint: string
+  completedPaths: string[]
+  updatedAt: number
+}
+
 /**
  * Resolve the LLM config that the caption pipeline should use.
  * `null` = captioning is OFF, caller should skip the pipeline
@@ -375,6 +383,7 @@ import { buildLanguageDirective, getOutputLanguage } from "@/lib/output-language
 import { detectLanguage } from "@/lib/detect-language"
 import { getLanguagePromptName, sameScriptFamily } from "@/lib/language-metadata"
 import {
+  correctWikiPageRouting,
   loadProjectWikiSchemaRouting,
   validateWikiPageRouting,
 } from "@/lib/wiki-schema"
@@ -1112,60 +1121,90 @@ async function autoIngestImpl(
   // LLM takes the analysis as context and produces wiki files + review items
   activity.updateItem(activityId, { detail: "Step 2/2: Generating wiki pages..." })
 
-  let generation = ""
-
-  await streamChat(
-    llmConfig,
-    [
-      { role: "system", content: buildGenerationPrompt(schema, purpose, index, sourceIdentity, overview, sourceContext, sourceSummaryPath) },
-      {
-        role: "user",
-        content: [
-          `Source document to process: **${sourceIdentity}**`,
-          "",
-          "The Stage 1 analysis below is CONTEXT to inform your output. Do NOT echo",
-          "its tables, bullet points, or prose. Your output must be FILE/REVIEW",
-          "blocks as specified in the system prompt — nothing else.",
-          "",
-          "## Stage 1 Analysis (context only — do not repeat)",
-          "",
-          analysis,
-          "",
-          "## Source Context",
-          "",
-          sourceContext,
-          "",
-          "---",
-          "",
-          `Now emit the FILE blocks for the wiki files derived from **${sourceIdentity}**.`,
-          "Your response MUST begin with `---FILE:` as the very first characters.",
-          "No preamble. No analysis prose. Start immediately.",
-        ].join("\n"),
-      },
-    ],
-    {
-      onToken: (token) => { generation += token },
-      onDone: () => {},
-      onError: (err) => {
-        activity.updateItem(activityId, { status: "error", detail: `Generation failed: ${err.message}` })
-      },
-    },
-    signal,
-    {
-      temperature: 0.1,
-      reasoning: resolveIngestReasoning(llmConfig),
-      max_tokens: computeIngestGenerationMaxTokens(llmConfig.maxContextSize),
-    },
+  const generationFingerprint = await sourceGenerationFingerprint(sp, sourceContent)
+  const generationProgressPath = generationCheckpointPath(
+    pp,
+    sourceSummarySlug,
+    generationFingerprint,
   )
+  const generationCheckpoint = await loadGenerationCheckpoint(
+    generationProgressPath,
+    sourceIdentity,
+    generationFingerprint,
+    pp,
+  )
+  const previouslyCompletedPaths = generationCheckpoint?.completedPaths ?? []
+  let generation = ""
+  let generationError: string | null = null
+  let generationTruncated = false
 
-  const generationActivity = useActivityStore.getState().items.find((i) => i.id === activityId)
-  if (generationActivity?.status === "error") {
-    throw new Error(generationActivity.detail || "Generation stream failed")
+  try {
+    await streamChat(
+      llmConfig,
+      [
+        { role: "system", content: buildGenerationPrompt(schema, purpose, index, sourceIdentity, overview, sourceContext, sourceSummaryPath) },
+        {
+          role: "user",
+          content: [
+            `Source document to process: **${sourceIdentity}**`,
+            "",
+            "The Stage 1 analysis below is CONTEXT to inform your output. Do NOT echo",
+            "its tables, bullet points, or prose. Your output must be FILE/REVIEW",
+            "blocks as specified in the system prompt — nothing else.",
+            previouslyCompletedPaths.length > 0
+              ? [
+                  "",
+                  "## Resume checkpoint",
+                  "The following FILE paths were already written successfully in an earlier attempt.",
+                  "Do not emit them again. Emit only the remaining pages required by the analysis:",
+                  ...previouslyCompletedPaths.map((path) => `- ${path}`),
+                ].join("\n")
+              : "",
+            "",
+            "## Stage 1 Analysis (context only — do not repeat)",
+            "",
+            analysis,
+            "",
+            "## Source Context",
+            "",
+            sourceContext,
+            "",
+            "---",
+            "",
+            `Now emit the FILE blocks for the wiki files derived from **${sourceIdentity}**.`,
+            "Your response MUST begin with `---FILE:` as the very first characters.",
+            "No preamble. No analysis prose. Start immediately.",
+          ].filter(Boolean).join("\n"),
+        },
+      ],
+      {
+        onToken: (token) => { generation += token },
+        onDone: (completion) => { generationTruncated = completion?.truncated === true },
+        onError: (err) => { generationError = err.message },
+      },
+      signal,
+      {
+        temperature: 0.1,
+        reasoning: resolveIngestReasoning(llmConfig),
+        max_tokens: computeIngestGenerationMaxTokens(llmConfig.maxContextSize),
+      },
+    )
+  } catch (err) {
+    throwIfIngestAborted(signal, activityId)
+    generationError = err instanceof Error ? err.message : String(err)
+  }
+
+  if ((generationError || generationTruncated) && parseFileBlocks(generation).blocks.length === 0) {
+    const message = generationError
+      ? `Generation failed before any complete wiki file was produced: ${generationError}`
+      : "Generation was truncated before any complete wiki file was produced."
+    activity.updateItem(activityId, { status: "error", detail: message })
+    throw new Error(message)
   }
   throwIfIngestAborted(signal, activityId)
 
   let reviewSuggestionOutput = ""
-  if (!signal?.aborted && shouldRunDedicatedReviewStage(generation)) {
+  if (!generationError && !generationTruncated && !signal?.aborted && shouldRunDedicatedReviewStage(generation)) {
     let reviewStageHadError = false
     try {
       await streamChat(
@@ -1227,7 +1266,10 @@ async function autoIngestImpl(
     onFileWritten,
   )
   throwIfIngestAborted(signal, activityId)
-  const writtenPaths = writeResult.writtenPaths
+  const writtenPaths = uniqueNormalizedPaths([
+    ...previouslyCompletedPaths,
+    ...writeResult.writtenPaths,
+  ])
   const writeWarnings = writeResult.warnings
   const hardFailures = writeResult.hardFailures
   let unrecoveredTruncatedPaths = uniqueNormalizedPaths(
@@ -1428,8 +1470,27 @@ async function autoIngestImpl(
   // incomplete result. Throwing here keeps the queue task visible as
   // pending/failed instead of removing it as "done" while Sources reports the
   // same file as not ingested.
-  if (hardFailures.length > 0 || unrecoveredTruncatedPaths.length > 0) {
+  const generationIncomplete = Boolean(generationError) || generationTruncated
+  if (generationIncomplete && writtenPaths.length > 0) {
+    try {
+      await saveGenerationCheckpoint(generationProgressPath, {
+        version: 1,
+        sourceIdentity,
+        sourceFingerprint: generationFingerprint,
+        completedPaths: writtenPaths.filter((path) => !isAppManagedAggregatePath(path)),
+        updatedAt: Date.now(),
+      })
+    } catch (err) {
+      hardFailures.push(
+        `Generation checkpoint write failed: ${err instanceof Error ? err.message : String(err)}`,
+      )
+    }
+  }
+
+  if (hardFailures.length > 0 || unrecoveredTruncatedPaths.length > 0 || generationIncomplete) {
     const reasons = [
+      generationError ? `generation stream failed: ${generationError}` : "",
+      generationTruncated ? "generation reached its output limit" : "",
       hardFailures.length > 0
         ? `${hardFailures.length} wiki file write failure(s)`
         : "",
@@ -1469,6 +1530,7 @@ async function autoIngestImpl(
     unrecoveredTruncatedPaths.length === 0
   ) {
     await saveIngestCache(pp, sourceIdentity, sourceContent, writtenPaths)
+    await clearGenerationCheckpoint(generationProgressPath)
     if (longSourceCheckpointPath) {
       await clearLongSourceCheckpoint(longSourceCheckpointPath)
     }
@@ -2009,11 +2071,23 @@ async function writeFileBlocks(
       !isLogPath(relativePath) &&
       !isListingPath(relativePath)
     ) {
-      const routingIssue = validateWikiPageRouting(
+      const correction = correctWikiPageRouting(
         relativePath,
         content,
         projectSchemaRouting,
       )
+      if (correction.message) {
+        if (!isSafeIngestPath(correction.path)) {
+          const msg = `Dropped "${relativePath}" — corrected schema path was unsafe.`
+          console.warn(`[ingest] ${msg}`)
+          warnings.push(msg)
+          continue
+        }
+        console.info(`[ingest] ${correction.message}`)
+        warnings.push(correction.message)
+        relativePath = correction.path
+      }
+      const routingIssue = validateWikiPageRouting(relativePath, content, projectSchemaRouting)
       if (routingIssue) {
         const msg = `Dropped "${relativePath}" — ${routingIssue.message}`
         console.warn(`[ingest] ${msg}`)
@@ -2828,6 +2902,65 @@ function longSourceCheckpointPath(
   sourceHash: string,
 ): string {
   return `${normalizePath(projectPath)}/.llm-wiki/ingest-progress/${sourceSummarySlug}-${sourceHash}.json`
+}
+
+function generationCheckpointPath(
+  projectPath: string,
+  sourceSummarySlug: string,
+  sourceFingerprint: string,
+): string {
+  return `${normalizePath(projectPath)}/.llm-wiki/ingest-generation/${sourceSummarySlug}-${sourceFingerprint}.json`
+}
+
+async function sourceGenerationFingerprint(sourcePath: string, sourceContent: string): Promise<string> {
+  const [modified, size] = await Promise.all([
+    getFileModifiedTime(sourcePath).catch(() => 0),
+    getFileSize(sourcePath).catch(() => 0),
+  ])
+  return hashTextHex(`${sourceContent}\0${modified}\0${size}`)
+}
+
+async function loadGenerationCheckpoint(
+  checkpointPath: string,
+  sourceIdentity: string,
+  sourceFingerprint: string,
+  projectPath: string,
+): Promise<GenerationCheckpoint | null> {
+  try {
+    const parsed = JSON.parse(await readFile(checkpointPath)) as GenerationCheckpoint
+    if (
+      parsed.version !== 1 ||
+      parsed.sourceIdentity !== sourceIdentity ||
+      parsed.sourceFingerprint !== sourceFingerprint ||
+      !Array.isArray(parsed.completedPaths)
+    ) return null
+    const completedPaths: string[] = []
+    for (const path of uniqueNormalizedPaths(parsed.completedPaths)) {
+      if (isSafeIngestPath(path) && await fileExists(`${projectPath}/${path}`)) {
+        completedPaths.push(path)
+      }
+    }
+    return { ...parsed, completedPaths }
+  } catch {
+    return null
+  }
+}
+
+async function saveGenerationCheckpoint(
+  checkpointPath: string,
+  checkpoint: GenerationCheckpoint,
+): Promise<void> {
+  await createDirectory(checkpointPath.split("/").slice(0, -1).join("/"))
+  await writeFile(checkpointPath, JSON.stringify(checkpoint, null, 2))
+}
+
+async function clearGenerationCheckpoint(checkpointPath: string): Promise<void> {
+  try {
+    if (await fileExists(checkpointPath)) await deleteFile(checkpointPath)
+  } catch {
+    // Best-effort cleanup; a completed checkpoint is harmless because the
+    // ingest cache short-circuits subsequent unchanged-source runs.
+  }
 }
 
 function isCompatibleLongSourceCheckpoint(
