@@ -25,7 +25,7 @@ import { cleanAssistantContentForWikiSave, titleFromCleanAssistantContent } from
 import { useTranslation } from "react-i18next"
 import { useAppDialog } from "@/stores/app-dialog-store"
 import { useResearchStore } from "@/stores/research-store"
-import { reviewResearchTopic, selectedResearchReviews } from "@/lib/review-batch-research"
+import { reviewResearchQueries, reviewResearchTopic, selectedResearchReviews } from "@/lib/review-batch-research"
 
 const typeConfig: Record<ReviewItem["type"], { icon: typeof AlertTriangle; color: string }> = {
   contradiction: { icon: AlertTriangle, color: "text-amber-500" },
@@ -101,7 +101,14 @@ export function ReviewView() {
         const llmConfig = useWikiStore.getState().llmConfig
         // Use pre-generated search queries if available, otherwise fall back to title
         const topic = item.title.replace(/^(Save to Wiki|Create|Research)[:\s]*/i, "").trim() || item.description.split("\n")[0]
-        queueResearch(pp, topic, llmConfig, searchConfig, item.searchQueries, id)
+        queueResearch(
+          pp,
+          topic,
+          llmConfig,
+          searchConfig,
+          reviewResearchQueries(item, topic),
+          id,
+        )
       } else {
         resolveItem(id, action)
       }
@@ -210,7 +217,14 @@ export function ReviewView() {
       if (item) {
         const llmConfig = useWikiStore.getState().llmConfig
         const topic = action.replace(/^research\s*/i, "").trim() || item.description.split("\n")[0]
-        queueResearch(pp, topic, llmConfig, searchConfig, undefined, id)
+        queueResearch(
+          pp,
+          topic,
+          llmConfig,
+          searchConfig,
+          reviewResearchQueries({ ...item, searchQueries: undefined }, topic),
+          id,
+        )
       } else {
         resolveItem(id, action)
       }
@@ -366,7 +380,7 @@ export function ReviewView() {
       normalizePath(project.path),
       eligibleItems.map((item) => ({
         topic: reviewResearchTopic(item),
-        searchQueries: item.searchQueries,
+        searchQueries: reviewResearchQueries(item),
         sourceReviewId: item.id,
       })),
       state.llmConfig,

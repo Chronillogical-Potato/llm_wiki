@@ -47,6 +47,7 @@ import { GENERATION_WIKI_TYPES } from "@/lib/wiki-page-types"
 import { computeContextBudget } from "@/lib/context-budget"
 import { refreshProjectFileTree } from "@/lib/project-file-tree-refresh"
 import { persistParsedMarkdown } from "@/lib/parsed-source-output"
+import { PROJECT_LOCAL_TERM_QUERY_RULES } from "@/lib/research-query-grounding"
 
 const LONG_SOURCE_MIN_BUDGET = 8_000
 const LONG_SOURCE_MAX_SINGLE_PASS_BUDGET = 300_000
@@ -2393,7 +2394,9 @@ export function buildGenerationPrompt(
     "Do NOT invent custom option labels. Only use 'Create Page' and 'Skip'.",
     "",
     "For suggestion and missing-page reviews, the SEARCH field must contain 2-3 web search queries",
-    "(keyword-rich, specific, suitable for a search engine — NOT titles or sentences). Example:",
+    "(concise, context-grounded, suitable for a search engine — NOT titles or sentences).",
+    ...PROJECT_LOCAL_TERM_QUERY_RULES,
+    "Example:",
     "  SEARCH: automated technical debt detection AI generated code | software quality metrics LLM code generation | static analysis tools agentic software development",
     "",
     purpose ? `## Wiki Purpose\n${purpose}` : "",
@@ -2443,7 +2446,7 @@ export function buildGenerationPrompt(
   ].filter(Boolean).join("\n")
 }
 
-function buildReviewSuggestionPrompt(
+export function buildReviewSuggestionPrompt(
   purpose: string,
   index: string,
   sourceIdentity: string,
@@ -2471,7 +2474,8 @@ function buildReviewSuggestionPrompt(
     "- duplicate: likely duplicate pages/names that need user review",
     "",
     "Prefer 1-5 high-signal reviews. If there is nothing worth reviewing, output nothing.",
-    "For suggestion and missing-page reviews, include a SEARCH line with 2-3 keyword-rich web search queries separated by ` | `.",
+    "For suggestion and missing-page reviews, include a SEARCH line with 2-3 context-grounded web search queries separated by ` | `.",
+    ...PROJECT_LOCAL_TERM_QUERY_RULES,
     "Use only these options: OPTIONS: Create Page | Skip",
     "",
     "REVIEW block template:",

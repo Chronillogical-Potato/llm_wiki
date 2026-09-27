@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest"
 import {
+  buildReviewSuggestionPrompt,
   buildAnalysisPrompt,
   buildGenerationPrompt,
   buildPageMergeSystemPrompt,
@@ -199,6 +200,40 @@ describe("page merge prompt", () => {
     expect(prompt).toContain("Never create comparison sections/tables about the merge inputs")
     expect(prompt).toContain("Never invent URLs")
     expect(prompt).not.toContain("describe the same entity")
+  })
+})
+
+describe("review research query prompt", () => {
+  it("grounds ambiguous internal terms before generating web queries", () => {
+    const prompt = buildReviewSuggestionPrompt(
+      "A private cognitive-analysis project",
+      "- [[attention-filter]]",
+      "internal-notes.md",
+      "AF is the project's attention-filter signal.",
+      "The pipeline dispatches AF events between internal modules.",
+      "---FILE: wiki/concepts/attention-filter.md---",
+      128_000,
+    )
+
+    expect(prompt).toContain("project-local vocabulary")
+    expect(prompt).toContain("Never emit a bare ambiguous term as a web query")
+    expect(prompt).toContain("Do not substitute a popular public meaning")
+    expect(prompt).toContain("underlying real-world concepts or comparisons")
+    expect(prompt).toContain("AF is the project's attention-filter signal")
+  })
+
+  it("applies the same grounding rules to the main generation path", () => {
+    const prompt = buildGenerationPrompt(
+      "A private cognitive-analysis project",
+      "- [[attention-filter]]",
+      "Project overview",
+      "internal-notes.md",
+      "AF is the project's attention-filter signal.",
+    )
+
+    expect(prompt).toContain("project-local vocabulary")
+    expect(prompt).toContain("Never emit a bare ambiguous term as a web query")
+    expect(prompt).toContain("Do not substitute a popular public meaning")
   })
 })
 

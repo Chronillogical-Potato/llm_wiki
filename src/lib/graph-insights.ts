@@ -20,6 +20,27 @@ export interface KnowledgeGap {
   suggestion: string
 }
 
+export function researchSeedForKnowledgeGap(
+  gap: KnowledgeGap,
+  nodes: readonly GraphNode[],
+): { term: string; context: string } {
+  const candidates = gap.nodeIds
+    .map((id) => nodes.find((node) => node.id === id))
+    .filter((node): node is GraphNode => Boolean(node))
+
+  if (gap.type === "isolated-node") {
+    return { term: candidates[0]?.label || gap.title, context: "" }
+  }
+
+  candidates.sort((a, b) => b.linkCount - a.linkCount)
+  const representative = candidates[0]?.label || gap.title
+  const related = candidates.slice(1, 3).map((node) => node.label)
+  return {
+    term: representative,
+    context: related.length > 0 ? related.join(" ") : "",
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Surprising Connections
 // ---------------------------------------------------------------------------
