@@ -80,6 +80,7 @@ const mocks = vi.hoisted(() => {
     }>),
     readFile: vi.fn(async (_path?: string) => ""),
     getFileSize: vi.fn(async (_path?: string) => 1024),
+    preprocessFile: vi.fn(async (path: string) => path),
     fileExists: vi.fn(async (_path?: string) => false),
     writeFile: vi.fn(async () => undefined),
     deleteFile: vi.fn(async () => undefined),
@@ -137,6 +138,7 @@ vi.mock("@/commands/fs", () => ({
   listDirectory: mocks.listDirectory,
   readFile: mocks.readFile,
   getFileSize: mocks.getFileSize,
+  preprocessFile: mocks.preprocessFile,
   fileExists: mocks.fileExists,
   writeFile: mocks.writeFile,
   deleteFile: mocks.deleteFile,
@@ -186,6 +188,7 @@ describe("project file sync", () => {
     mocks.listDirectory.mockImplementation(async (_path?: string) => [])
     mocks.readFile.mockImplementation(async (_path?: string) => "")
     mocks.getFileSize.mockImplementation(async (_path?: string) => 1024)
+    mocks.preprocessFile.mockImplementation(async (path: string) => path)
     mocks.fileExists.mockImplementation(async (_path?: string) => false)
     mocks.writeFile.mockImplementation(async () => undefined)
     mocks.deleteFile.mockImplementation(async () => undefined)
@@ -309,6 +312,7 @@ describe("project file sync", () => {
 
     expect(mocks.enqueueBatch).toHaveBeenCalledWith("A", [
       { sourcePath: "raw/sources/report.pdf", folderContext: "" },
+      { sourcePath: "raw/sources/image.png", folderContext: "" },
     ])
   })
 
