@@ -189,11 +189,15 @@ describe("analysis + generation prompt consistency", () => {
 describe("page merge prompt", () => {
   it("keeps comparisons attribution-exact instead of folding them into the main subject", () => {
     const prompt = buildPageMergeSystemPrompt()
-    expect(prompt).toContain("Both versions target the same wiki page")
+    expect(prompt).toContain("inputs are internal containers, not revisions or competing versions")
     expect(prompt).toContain("may mention additional subjects for comparison or context")
     expect(prompt).toContain("keep those comparisons attribution-exact")
     expect(prompt).toContain("do not fold them into claims about the main page subject")
     expect(prompt).toContain("prefer keeping them separate")
+    expect(prompt).toContain("attribute a claim to a real source filename only when the supporting file is unambiguous")
+    expect(prompt).toContain("otherwise do not guess")
+    expect(prompt).toContain("Never create comparison sections/tables about the merge inputs")
+    expect(prompt).toContain("Never invent URLs")
     expect(prompt).not.toContain("describe the same entity")
   })
 })

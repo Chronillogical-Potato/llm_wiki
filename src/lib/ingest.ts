@@ -3078,15 +3078,31 @@ async function analyzeLongSourceInChunks(
 function buildPageMerger(llmConfig: LlmConfig): MergeFn {
   return async (existingContent, incomingContent, sourceFileName, signal) => {
     const systemPrompt = buildPageMergeSystemPrompt()
+    const sanitizeProvenance = (value: string) => value
+      .replace(/[\r\n#`]+/g, " ")
+      .replace(/---+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 240)
+    const safeSourceFileName = sanitizeProvenance(sourceFileName)
+    const existingSources = parseFrontmatter(existingContent).frontmatter?.sources
+    const existingProvenance = Array.isArray(existingSources)
+      ? existingSources
+        .filter((source): source is string => typeof source === "string")
+        .map(sanitizeProvenance)
+        .filter(Boolean)
+        .join(", ")
+        .slice(0, 1_000)
+      : "sources listed in the existing page frontmatter"
 
     const userMessage = [
-      `## Existing version on disk`,
+      `## Previously collected material (provenance: ${existingProvenance || "existing page sources"})`,
       "",
       existingContent,
       "",
       "---",
       "",
-      `## Newly generated version (from ${sourceFileName})`,
+      `## Additional material (provenance: ${safeSourceFileName || "additional source"})`,
       "",
       incomingContent,
       "",
@@ -3130,21 +3146,23 @@ function buildPageMerger(llmConfig: LlmConfig): MergeFn {
 
 export function buildPageMergeSystemPrompt(): string {
   return [
-    "You are merging two versions of the same wiki page into one coherent document.",
-    "Both versions target the same wiki page; one is already on disk,",
-    "the other was just generated from a different source document.",
-    "Either version may mention additional subjects for comparison or context.",
+    "You are merging source-backed material for the same wiki page into one coherent document.",
+    "The inputs are internal containers, not revisions or competing versions.",
+    "Either input may mention additional subjects for comparison or context.",
     "",
     "Output ONE merged version that:",
-    "- Preserves every factual claim from both versions (do not drop content)",
-    "- Eliminates redundancy when both versions state the same fact",
-    "- Preserves subject/source boundaries: if either version mentions other entities/models/products/methods for comparison, keep those comparisons attribution-exact and do not fold them into claims about the main page subject",
-    "- When claims conflict or apply to different subjects, keep them separated and say which source version supports each one instead of synthesizing a single generalized conclusion",
+    "- Preserves every factual claim from both inputs (do not drop content)",
+    "- Eliminates redundancy when both inputs state the same fact",
+    "- Preserves subject/source boundaries: if either input mentions other entities/models/products/methods for comparison, keep those comparisons attribution-exact and do not fold them into claims about the main page subject",
+    "- When claims conflict or apply to different subjects, keep them separated; attribute a claim to a real source filename only when the supporting file is unambiguous, otherwise do not guess",
     "- When in doubt whether two similar-looking claims describe the same fact, prefer keeping them separate",
     "- Reorganizes sections so the structure is logical for the merged topic,",
     "  not just a concatenation of the two inputs",
     "- Uses consistent markdown structure (headings, tables, lists, callouts)",
     "- Keeps `[[wikilink]]` references intact",
+    "- Never describe the merge inputs as existing/new/original/old versions in headings, prose, notes, or table columns",
+    "- Never create comparison sections/tables about the merge inputs themselves",
+    "- Never invent URLs, citations, source names, or placeholder references",
     "",
     "Output requirements:",
     "- The FIRST character of your response MUST be `-` (the opening of `---`)",
