@@ -12,6 +12,21 @@ describe("source watch config", () => {
       expect(DEFAULT_SOURCE_WATCH_CONFIG.includeExtensions).toContain(extension)
     }
   })
+  it("includes standalone image sources in the default watch set", () => {
+    for (const extension of ["png", "jpg", "jpeg"]) {
+      expect(DEFAULT_SOURCE_WATCH_CONFIG.includeExtensions).toContain(extension)
+    }
+  })
+
+  it("upgrades the previous default extension set without changing custom lists", () => {
+    const previousDefaults = DEFAULT_SOURCE_WATCH_CONFIG.includeExtensions.filter(
+      (extension) => !["png", "jpg", "jpeg"].includes(extension),
+    )
+    expect(normalizeSourceWatchConfig({ includeExtensions: previousDefaults }).includeExtensions)
+      .toEqual([...previousDefaults, "png", "jpg", "jpeg"])
+    expect(normalizeSourceWatchConfig({ includeExtensions: ["md", "pdf"] }).includeExtensions)
+      .toEqual(["md", "pdf"])
+  })
   it("uses the shared default fixture", () => {
     expect(DEFAULT_SOURCE_WATCH_CONFIG).toEqual(sourceWatchDefaults)
     expect(normalizeSourceWatchConfig({}).persistExtractedMarkdown).toBe(false)
