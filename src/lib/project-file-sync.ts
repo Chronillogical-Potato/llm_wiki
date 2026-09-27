@@ -9,7 +9,8 @@ import {
 } from "@/commands/file-sync"
 import { useFileSyncStore } from "@/stores/file-sync-store"
 import { useWikiStore } from "@/stores/wiki-store"
-import { getFileStem, normalizePath } from "@/lib/path-utils"
+import { normalizePath } from "@/lib/path-utils"
+import { wikiPageIdFromPath } from "@/lib/embedding"
 import type { WikiProject } from "@/types/wiki"
 import type { SourceWatchConfig } from "@/stores/wiki-store"
 import type { FileChangeTask } from "@/commands/file-sync"
@@ -395,20 +396,24 @@ async function cleanupDeletedFiles(project: WikiProject, tasks: FileChangeTask[]
   const rawSources = deleted.filter(isRawSourcePathForCascade)
   const wikiPages = deleted.filter(isWikiPageForCascade)
 
-  let deletedWikiSlugs = new Set<string>()
+  let deletedWikiIds = new Set<string>()
   if (rawSources.length > 0) {
     try {
       const result = await deleteSourceFiles(project.path, rawSources, {
         fileAlreadyDeleted: true,
         logReason: rawSources.length === 1 ? "external delete" : "external batch delete",
       })
-      deletedWikiSlugs = new Set(result.deletedWikiPaths.map((path) => getFileStem(path)))
+      deletedWikiIds = new Set(
+        result.deletedWikiPaths.map((path) => wikiPageIdFromPath(project.path, path)),
+      )
     } catch (err) {
       console.error("[file-sync] failed to clean deleted raw sources:", err)
     }
   }
 
-  const wikiPagesToClean = wikiPages.filter((path) => !deletedWikiSlugs.has(getFileStem(path)))
+  const wikiPagesToClean = wikiPages.filter(
+    (path) => !deletedWikiIds.has(wikiPageIdFromPath(project.path, path)),
+  )
   if (wikiPagesToClean.length > 0) {
     try {
       await cleanupDeletedWikiPages(project.path, wikiPagesToClean)

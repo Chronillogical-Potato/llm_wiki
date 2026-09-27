@@ -107,6 +107,14 @@ const mocks = vi.hoisted(() => {
     removeFromIngestCache: vi.fn(async () => undefined),
     moveIngestCacheEntry: vi.fn(async () => undefined),
     removePageEmbedding: vi.fn(async () => undefined),
+    wikiPageIdFromPath: vi.fn((projectPath: string, pagePath: string) => {
+      const normalizedProject = projectPath.replace(/\\/g, "/").replace(/\/$/, "")
+      const normalizedPage = pagePath.replace(/\\/g, "/")
+      const relative = normalizedPage.startsWith(`${normalizedProject}/`)
+        ? normalizedPage.slice(normalizedProject.length + 1)
+        : normalizedPage
+      return relative.replace(/^wiki\//i, "").replace(/\.md$/i, "")
+    }),
     cascadeDeleteWikiPagesWithRefs: vi.fn(async () => ({
       deletedPaths: [] as string[],
       rewrittenFiles: 0,
@@ -153,6 +161,7 @@ vi.mock("@/lib/ingest-cache", () => ({
 
 vi.mock("@/lib/embedding", () => ({
   removePageEmbedding: mocks.removePageEmbedding,
+  wikiPageIdFromPath: mocks.wikiPageIdFromPath,
 }))
 
 vi.mock("@/lib/wiki-page-delete", () => ({

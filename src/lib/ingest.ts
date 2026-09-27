@@ -1481,10 +1481,11 @@ async function autoIngestImpl(
   const embCfg = useWikiStore.getState().embeddingConfig
   if (embCfg.enabled && embCfg.model && writtenPaths.length > 0) {
     try {
-      const { embedPage } = await import("@/lib/embedding")
+      const { embedPage, wikiPageIdFromPath } = await import("@/lib/embedding")
       for (const wpath of writtenPaths) {
-        const pageId = wpath.split("/").pop()?.replace(/\.md$/, "") ?? ""
-        if (!pageId || ["index", "log", "overview"].includes(pageId)) continue
+        const pageId = wikiPageIdFromPath(pp, wpath)
+        const pageStem = wpath.split("/").pop()?.replace(/\.md$/, "") ?? ""
+        if (!pageId || ["index", "log", "overview"].includes(pageStem)) continue
         try {
           const content = await readFile(`${pp}/${wpath}`)
           const fmTitle = parseFrontmatter(content).frontmatter?.title
@@ -3283,8 +3284,14 @@ async function reembedSourceSummary(
     const content = await readFile(sourceSummaryFullPath)
     const fmTitle = parseFrontmatter(content).frontmatter?.title
     const title = typeof fmTitle === "string" && fmTitle.trim() ? fmTitle.trim() : sourceIdentity
-    const { embedPage } = await import("@/lib/embedding")
-    await embedPage(pp, sourceSummarySlug, title, content, embCfg)
+    const { embedPage, wikiPageIdFromPath } = await import("@/lib/embedding")
+    await embedPage(
+      pp,
+      wikiPageIdFromPath(pp, sourceSummaryFullPath),
+      title,
+      content,
+      embCfg,
+    )
     console.log(`[ingest:caption] re-embedded ${sourceSummarySlug} with captioned alt text`)
   } catch (err) {
     console.warn(

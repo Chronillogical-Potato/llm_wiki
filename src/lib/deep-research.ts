@@ -75,8 +75,10 @@ export function addResearchTaskDiscriminator(fileName: string, taskId: string): 
 }
 
 export function researchPageIdFromPath(filePath: string): string {
-  const fileName = filePath.split(/[\\/]/).pop() || filePath
-  return fileName.replace(/\.md$/i, "")
+  const normalized = filePath.replace(/\\/g, "/")
+  const wikiIndex = normalized.lastIndexOf("/wiki/")
+  const relative = wikiIndex >= 0 ? normalized.slice(wikiIndex + 6) : normalized
+  return relative.replace(/^wiki\//, "").replace(/\.md$/i, "")
 }
 
 interface ResearchSourceDeps {
@@ -532,8 +534,14 @@ async function executeResearch(
     const embeddingConfig = useWikiStore.getState().embeddingConfig
     if (embeddingConfig.enabled && embeddingConfig.model) {
       try {
-        const { embedPage } = await import("@/lib/embedding")
-        await embedPage(pp, researchPageIdFromPath(filePath), `Research: ${topic}`, pageContent, embeddingConfig)
+        const { embedPage, wikiPageIdFromPath } = await import("@/lib/embedding")
+        await embedPage(
+          pp,
+          wikiPageIdFromPath(pp, filePath),
+          `Research: ${topic}`,
+          pageContent,
+          embeddingConfig,
+        )
       } catch (err) {
         console.warn("[DeepResearch] failed to index generated query page:", err)
       }

@@ -343,7 +343,8 @@ pub async fn search_project_inner(
     };
     let query_phrase = trim_query_punctuation(&query.to_lowercase());
     let mut results = Vec::new();
-    let mut page_paths_by_stem = BTreeMap::new();
+    let mut page_paths_by_vector_id = BTreeMap::new();
+    let mut legacy_stem_candidates = BTreeMap::<String, Vec<String>>::new();
     let mut graph_pages = BTreeMap::new();
 
     let wiki_root = Path::new(&project_path).join("wiki");
@@ -351,7 +352,11 @@ pub async fn search_project_inner(
         let mut searched_files = 0usize;
         for entry in WalkDir::new(&wiki_root).into_iter().filter_map(Result::ok) {
             if !entry.file_type().is_file()
-                || entry.path().extension().and_then(|s| s.to_str()) != Some("md")
+                || !entry
+                    .path()
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
             {
                 continue;
             }
@@ -366,19 +371,16 @@ pub async fn search_project_inner(
                 Ok(content) => content,
                 Err(_) => continue,
             };
-            if let Some(stem) = entry.path().file_stem().and_then(|s| s.to_str()) {
-                let previous = page_paths_by_stem.insert(
-                    stem.to_string(),
-                    relative_to_project(&project_path, entry.path()),
-                );
-                if let Some(previous) = previous {
-                    eprintln!(
-                        "[Search] duplicate wiki page stem '{stem}': '{previous}' and '{}' share one vector page_id",
-                        relative_to_project(&project_path, entry.path())
-                    );
-                }
-            }
             let relative_path = relative_to_project(&project_path, entry.path());
+            if let Some(vector_id) = vector_page_id(&relative_path) {
+                page_paths_by_vector_id.insert(vector_id, relative_path.clone());
+            }
+            if let Some(stem) = entry.path().file_stem().and_then(|s| s.to_str()) {
+                legacy_stem_candidates
+                    .entry(stem.to_string())
+                    .or_default()
+                    .push(relative_path.clone());
+            }
             let title = extract_title(
                 &content,
                 entry
@@ -410,6 +412,10 @@ pub async fn search_project_inner(
             }
         }
     }
+    let legacy_page_paths = legacy_stem_candidates
+        .into_iter()
+        .filter_map(|(stem, paths)| (paths.len() == 1).then(|| (stem, paths[0].clone())))
+        .collect::<BTreeMap<_, _>>();
 
     let mut token_sorted = (0..results.len()).collect::<Vec<_>>();
     token_sorted.sort_by(|a, b| {
@@ -439,7 +445,8 @@ pub async fn search_project_inner(
                     }
                     materialize_vector_only_results(
                         &vector_results,
-                        &page_paths_by_stem,
+                        &page_paths_by_vector_id,
+                        &legacy_page_paths,
                         &project_path,
                         &mut results,
                         include_content,
@@ -455,7 +462,13 @@ pub async fn search_project_inner(
     }
 
     if vector_hits > 0 {
-        apply_rrf_scores(&mut results, &token_rank, &vector_rank, &vector_score);
+        apply_rrf_scores(
+            &mut results,
+            &token_rank,
+            &vector_rank,
+            &vector_score,
+            &legacy_page_paths,
+        );
     }
 
     results.sort_by(|a, b| {
@@ -486,10 +499,23 @@ fn apply_rrf_scores(
     token_rank: &BTreeMap<String, usize>,
     vector_rank: &BTreeMap<String, usize>,
     vector_score: &BTreeMap<String, f32>,
+    legacy_page_paths: &BTreeMap<String, String>,
 ) {
     for result in results {
         let token = token_rank.get(&normalize_path(&result.path)).copied();
-        let vector = vector_rank.get(&file_stem(&result.path)).copied();
+        let vector_id = vector_page_id(&result.path).unwrap_or_else(|| file_stem(&result.path));
+        let legacy_stem = file_stem(&result.path);
+        let legacy_matches_page = legacy_page_paths
+            .get(&legacy_stem)
+            .is_some_and(|path| normalize_path(path) == normalize_path(&result.path));
+        let vector = vector_rank
+            .get(&vector_id)
+            .or_else(|| {
+                legacy_matches_page
+                    .then(|| vector_rank.get(&legacy_stem))
+                    .flatten()
+            })
+            .copied();
         let mut rrf = 0.0;
         if let Some(rank) = token {
             rrf += 1.0 / (RRF_K + rank as f64);
@@ -497,7 +523,15 @@ fn apply_rrf_scores(
         if let Some(rank) = vector {
             rrf += 1.0 / (RRF_K + rank as f64);
         }
-        if let Some(score) = vector_score.get(&file_stem(&result.path)).copied() {
+        if let Some(score) = vector_score
+            .get(&vector_id)
+            .or_else(|| {
+                legacy_matches_page
+                    .then(|| vector_score.get(&legacy_stem))
+                    .flatten()
+            })
+            .copied()
+        {
             result.vector_score = Some(score);
         }
         result.score = rrf;
@@ -819,17 +853,35 @@ async fn search_by_embedding(
 
 fn materialize_vector_only_results(
     vector_results: &[PageVectorResult],
-    page_paths_by_stem: &BTreeMap<String, String>,
+    page_paths_by_vector_id: &BTreeMap<String, String>,
+    legacy_page_paths: &BTreeMap<String, String>,
     project_path: &str,
     results: &mut Vec<ProjectSearchResult>,
     include_content: bool,
 ) {
-    let mut known: BTreeSet<String> = results.iter().map(|r| file_stem(&r.path)).collect();
-    for vr in vector_results {
-        if known.contains(&vr.id) {
-            continue;
-        }
-        if let Some(rel) = page_paths_by_stem.get(&vr.id) {
+    let mut known_paths: BTreeSet<String> = results
+        .iter()
+        .map(|result| normalize_path(&result.path))
+        .collect();
+    // Materialize path-qualified rows first. During migration a page can have
+    // both a current row and a legacy basename row; the current score/snippet
+    // must win regardless of the backend's result order.
+    for qualified_only in [true, false] {
+        for vr in vector_results {
+            let rel = if qualified_only {
+                page_paths_by_vector_id.get(&vr.id)
+            } else if page_paths_by_vector_id.contains_key(&vr.id) {
+                None
+            } else {
+                legacy_page_paths.get(&vr.id)
+            };
+            let Some(rel) = rel else {
+                continue;
+            };
+            let normalized_rel = normalize_path(rel);
+            if known_paths.contains(&normalized_rel) {
+                continue;
+            }
             let path = Path::new(project_path).join(rel);
             let Ok(content) = fs::read_to_string(&path) else {
                 continue;
@@ -851,7 +903,7 @@ fn materialize_vector_only_results(
                 content: include_content.then_some(content),
                 graph_related_to: Vec::new(),
             });
-            known.insert(vr.id.clone());
+            known_paths.insert(normalized_rel);
         }
     }
 }
@@ -1713,6 +1765,18 @@ fn file_stem(path: &str) -> String {
         .to_string()
 }
 
+fn vector_page_id(path: &str) -> Option<String> {
+    let normalized = normalize_path(path);
+    let wiki_relative = normalized.strip_prefix("wiki/").unwrap_or(&normalized);
+    if wiki_relative.len() < 3
+        || !wiki_relative[wiki_relative.len() - 3..].eq_ignore_ascii_case(".md")
+    {
+        return None;
+    }
+    let id = wiki_relative[..wiki_relative.len() - 3].trim_matches('/');
+    (!id.is_empty()).then(|| id.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2018,7 +2082,20 @@ mod tests {
         let vector_score =
             BTreeMap::from([("both".to_string(), 0.95), ("vector-only".to_string(), 0.8)]);
 
-        apply_rrf_scores(&mut results, &token_rank, &vector_rank, &vector_score);
+        let legacy_page_paths = BTreeMap::from([
+            ("both".to_string(), "wiki/concepts/both.md".to_string()),
+            (
+                "vector-only".to_string(),
+                "wiki/concepts/vector-only.md".to_string(),
+            ),
+        ]);
+        apply_rrf_scores(
+            &mut results,
+            &token_rank,
+            &vector_rank,
+            &vector_score,
+            &legacy_page_paths,
+        );
         results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
 
         assert_eq!(results[0].path, "wiki/concepts/both.md");
@@ -2054,20 +2131,21 @@ mod tests {
             "---\ntitle: Deep Page\n---\n\n# Deep Page\n\nThe literal query is absent here.",
         );
         let vector_results = vec![PageVectorResult {
-            id: "deep-page".to_string(),
+            id: "custom/deep-page".to_string(),
             score: 0.91,
             chunk_text: "A semantic chunk explains the actual reason for retrieval.".to_string(),
             heading_path: "Section > Detail".to_string(),
         }];
         let mut results = Vec::new();
         let pages = BTreeMap::from([(
-            "deep-page".to_string(),
+            "custom/deep-page".to_string(),
             "wiki/custom/deep-page.md".to_string(),
         )]);
 
         materialize_vector_only_results(
             &vector_results,
             &pages,
+            &BTreeMap::new(),
             &root.to_string_lossy(),
             &mut results,
             false,
@@ -2079,6 +2157,49 @@ mod tests {
         assert_eq!(results[0].vector_score, Some(0.91));
         assert!(results[0].snippet.contains("Section > Detail"));
         assert!(results[0].snippet.contains("semantic chunk"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn vector_only_materialization_prefers_qualified_rows_over_legacy_rows() {
+        let root = tmp_project();
+        write_page(&root, "wiki/entities/topic.md", "# Topic\n\nCurrent content.");
+        let vector_results = vec![
+            PageVectorResult {
+                id: "topic".to_string(),
+                score: 0.99,
+                chunk_text: "Stale legacy chunk".to_string(),
+                heading_path: String::new(),
+            },
+            PageVectorResult {
+                id: "entities/topic".to_string(),
+                score: 0.82,
+                chunk_text: "Current qualified chunk".to_string(),
+                heading_path: String::new(),
+            },
+        ];
+        let qualified = BTreeMap::from([(
+            "entities/topic".to_string(),
+            "wiki/entities/topic.md".to_string(),
+        )]);
+        let legacy = BTreeMap::from([(
+            "topic".to_string(),
+            "wiki/entities/topic.md".to_string(),
+        )]);
+        let mut results = Vec::new();
+
+        materialize_vector_only_results(
+            &vector_results,
+            &qualified,
+            &legacy,
+            &root.to_string_lossy(),
+            &mut results,
+            false,
+        );
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].vector_score, Some(0.82));
+        assert!(results[0].snippet.contains("Current qualified chunk"));
         let _ = fs::remove_dir_all(root);
     }
 

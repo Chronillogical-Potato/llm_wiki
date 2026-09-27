@@ -1888,7 +1888,6 @@ fn handle_embed_page(app: &AppHandle, project_id: &str, body: &str) -> ApiRespon
                 commands::page_embedding::PageEmbeddingErrorKind::NotFound => 404,
                 commands::page_embedding::PageEmbeddingErrorKind::Provider => 502,
                 commands::page_embedding::PageEmbeddingErrorKind::Storage => 500,
-                commands::page_embedding::PageEmbeddingErrorKind::Conflict => 409,
                 commands::page_embedding::PageEmbeddingErrorKind::Timeout => 504,
             };
             err(status, error.message)
