@@ -37,7 +37,11 @@ import {
   buildImageMarkdownSection,
   type SavedImage,
 } from "@/lib/extract-source-images"
-import { captionMarkdownImages, loadCaptionCache } from "@/lib/image-caption-pipeline"
+import {
+  captionMarkdownImages,
+  loadCaptionCache,
+  stripMarkdownImageReferences,
+} from "@/lib/image-caption-pipeline"
 import type { MultimodalConfig } from "@/stores/wiki-store"
 import { GENERATION_WIKI_TYPES } from "@/lib/wiki-page-types"
 import { computeContextBudget } from "@/lib/context-budget"
@@ -982,13 +986,9 @@ async function autoIngestImpl(
   const mmCfg = useWikiStore.getState().multimodalConfig
   const captionLlm = resolveCaptionConfig(mmCfg, llmConfig)
   if (!mmCfg.enabled && savedImages.length > 0) {
-    // Strip `![alt](url)` references — match the same regex shape
-    // we use elsewhere for image refs. Preserve a single space
+    // Strip recognized `![alt](url)` references with the shared parser. Preserve a single space
     // where the ref used to sit so adjacent words don't fuse.
-    enrichedSourceContent = sourceContent.replace(
-      /!\[[^\]]*\]\([^)\s]+\)/g,
-      " ",
-    )
+    enrichedSourceContent = stripMarkdownImageReferences(sourceContent)
     console.log(
       `[ingest:caption] disabled — stripped image refs from sourceContent (${savedImages.length} image(s) won't appear in wiki pages)`,
     )
