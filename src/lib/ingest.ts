@@ -2208,6 +2208,26 @@ function shouldRunDedicatedReviewStage(generation: string): boolean {
     || /---REVIEW:\s*[\w-]+\s*\|[\s\S]*$/i.test(generation)
 }
 
+const ENTITY_ANALYSIS_RULES = [
+  "Apply a standalone-page significance threshold: page-worthy subjects are central to the source, recur meaningfully, carry substantive claims, or are reusable across the wiki.",
+  "Do not mark passing mentions, ordinary story props, unnamed or generic-role people, chapter/part labels, or internal workflow artifacts as page-worthy unless the source makes them independently important knowledge subjects.",
+  "For every candidate, output `Page-worthy: yes` or `Page-worthy: no` plus one short justification. Keep non-page-worthy candidates only as context for the source summary.",
+  "Canonical naming priority: reuse the exact title of an existing wiki page first; otherwise preserve the source spelling. Widely used localized names may be recorded as aliases, but never invent or phonetically guess a name.",
+] as const
+
+const ENTITY_PAGE_RULES = [
+  "Create a standalone entity page only for a candidate explicitly marked `Page-worthy: yes`. Keep other mentions as plain prose in the source summary, or as wikilinks only when the target already exists in the current wiki index.",
+  "Canonical naming priority: reuse the exact title of an existing wiki page first; otherwise preserve the source spelling. A widely used localized name may be an alias, but never invent or phonetically guess a name.",
+  "The opening paragraph of every entity page must answer what the subject is, not merely describe its role in this source.",
+  "Prefer an identity supported by the source or existing wiki. If one short identity sentence must use stable, high-confidence public knowledge to identify a well-known subject, clearly label it as independently verifiable background in the mandatory output language so it is not attributed to the imported source. Never add uncertain details; when neither the source nor existing wiki establishes an unambiguous identity, do not create the standalone page.",
+] as const
+
+const LONG_SOURCE_ENTITY_RULES = [
+  "In each Chunk Analysis, record named-subject mentions and identity evidence without making a final standalone-page decision from one chunk alone.",
+  "In Updated Global Digest > Entities, accumulate recurrence across chunks and output for each candidate: canonical name, identity, supporting chunks, significance evidence, and `Page-worthy: yes` or `Page-worthy: no`.",
+  ...ENTITY_ANALYSIS_RULES,
+] as const
+
 /**
  * Step 1 prompt: AI reads the source and produces a structured analysis.
  * This is the "discussion" step — the AI reasons about the source before writing wiki pages.
@@ -2227,10 +2247,11 @@ export function buildAnalysisPrompt(
     "Your analysis should cover:",
     "",
     "## Key Entities",
-    "List people, organizations, products, datasets, tools mentioned. For each:",
+    "List candidate named people, organizations, products, datasets, and tools. For each:",
     "- Name and type",
-    "- Role in the source (central vs. peripheral)",
+    "- Role and significance in the source",
     "- Whether it likely already exists in the wiki (check the index)",
+    ...ENTITY_ANALYSIS_RULES,
     "",
     "## Key Concepts",
     "List theories, methods, techniques, phenomena. For each:",
@@ -2317,6 +2338,8 @@ export function buildGenerationPrompt(
     "2. Entity or schema-defined typed pages for key named things identified in the analysis. Prefer schema-defined directories when present; otherwise use wiki/entities/.",
     "3. Concept or schema-defined typed pages for key ideas, methods, techniques, and abstractions. Prefer schema-defined directories when present; otherwise use wiki/concepts/.",
     "4. A log entry for wiki/log.md (just the new entry to append, format: ## [YYYY-MM-DD] ingest | Title)",
+    ...ENTITY_PAGE_RULES,
+    "For consolidated long-document analyses, the Final Global Digest is authoritative for `Page-worthy` decisions; per-chunk mention notes are evidence, not page-creation instructions.",
     "Do not generate wiki/index.md or wiki/overview.md. The application maintains aggregate navigation separately so large wikis are never rewritten through model output.",
     "",
     "## Frontmatter Rules (CRITICAL — parser is strict)",
@@ -2873,7 +2896,7 @@ function extractMarkedSection(raw: string, heading: string): string {
   return re.exec(raw)?.[1]?.trim() ?? ""
 }
 
-function buildChunkAnalysisSystemPrompt(
+export function buildChunkAnalysisSystemPrompt(
   purpose: string,
   schema: string,
   index: string,
@@ -2901,6 +2924,8 @@ function buildChunkAnalysisSystemPrompt(
     "## Updated Global Digest",
     "A compact document-level digest that incorporates this chunk and preserves prior cross-chunk context.",
     "Keep this digest structured under: Summary, Entities, Concepts, Schema-Typed Candidates, Claims, Evidence, Contradictions, Open Questions, Cross-Chunk Relations.",
+    "Entity handling rules:",
+    ...LONG_SOURCE_ENTITY_RULES.map((rule) => `- ${rule}`),
     "Use schema-defined types only when the source actually supports them; never invent goals, habits, journal entries, decisions, or similar user-authored records that are not present in the source.",
     "",
     "Stable project context follows. It changes rarely and should be treated as background:",

@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from "vitest"
 import {
   buildReviewSuggestionPrompt,
   buildAnalysisPrompt,
+  buildChunkAnalysisSystemPrompt,
   buildGenerationPrompt,
   buildPageMergeSystemPrompt,
   computeIngestGenerationMaxTokens,
@@ -55,6 +56,19 @@ describe("buildAnalysisPrompt language directive", () => {
     const prompt = buildAnalysisPrompt("", "", "")
     expect(prompt).toContain("Which named subject is each claim about")
     expect(prompt).toContain("Do not transfer claims, limits, or evaluations")
+  })
+
+  it("applies a significance and canonical-name threshold to entities", () => {
+    const prompt = buildAnalysisPrompt("", "", "")
+
+    expect(prompt).toContain("standalone-page significance threshold")
+    expect(prompt).toContain("passing mentions")
+    expect(prompt).toContain("ordinary story props")
+    expect(prompt).toContain("unnamed or generic-role people")
+    expect(prompt).toContain("Page-worthy: yes")
+    expect(prompt).toContain("reuse the exact title of an existing wiki page first")
+    expect(prompt).toContain("never invent or phonetically guess a name")
+    expect(prompt).not.toContain("central vs. peripheral")
   })
 
   it("injects the project schema so analysis can recommend custom-typed pages", () => {
@@ -142,6 +156,34 @@ describe("buildGenerationPrompt language directive", () => {
     expect(prompt).toContain("Preserve subject boundaries")
     expect(prompt).toContain("Do not merge or generalize a claim about one subject into another subject's page")
     expect(prompt).toContain("cite which source/frontmatter `sources` entry supports that statement")
+  })
+
+  it("requires standalone entity pages to establish identity without promoting incidental mentions", () => {
+    const prompt = buildGenerationPrompt("", "", "", "source.pdf")
+
+    expect(prompt).toContain("only for a candidate explicitly marked `Page-worthy: yes`")
+    expect(prompt).toContain("wikilinks only when the target already exists")
+    expect(prompt).toContain("opening paragraph of every entity page must answer what the subject is")
+    expect(prompt).toContain("stable, high-confidence public knowledge")
+    expect(prompt).toContain("independently verifiable background in the mandatory output language")
+    expect(prompt).toContain("do not create the standalone page")
+    expect(prompt).toContain("reuse the exact title of an existing wiki page first")
+    expect(prompt).toContain("Final Global Digest is authoritative")
+  })
+
+  it("defers long-source entity significance decisions to the global digest", () => {
+    const prompt = buildChunkAnalysisSystemPrompt("", "", "", "long source")
+    const chunkStart = prompt.indexOf("## Chunk Analysis")
+    const digestStart = prompt.indexOf("## Updated Global Digest")
+    const entityRules = prompt.indexOf("Entity handling rules:")
+
+    expect(chunkStart).toBeGreaterThanOrEqual(0)
+    expect(digestStart).toBeGreaterThan(chunkStart)
+    expect(entityRules).toBeGreaterThan(digestStart)
+    expect(prompt).toContain("without making a final standalone-page decision from one chunk alone")
+    expect(prompt).toContain("accumulate recurrence across chunks")
+    expect(prompt).toContain("supporting chunks")
+    expect(prompt).toContain("Page-worthy: yes")
   })
 
   it("makes project schema routing authoritative over default entity and concept folders", () => {
