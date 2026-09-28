@@ -21,7 +21,13 @@ verify_app() {
 }
 
 verify_app "$app_path"
-xcrun stapler validate "$dmg_path"
+
+# Tauri notarizes and staples the app bundle before packaging it into the DMG.
+# The DMG is a transport container and does not necessarily carry its own
+# stapled ticket, so validate the container itself and then verify the mounted
+# app bundle below.
+echo "Verifying DMG container integrity: $dmg_path"
+hdiutil verify "$dmg_path"
 
 mount_point="$(mktemp -d "${TMPDIR:-/tmp}/llm-wiki-dmg.XXXXXX")"
 mounted=0
